@@ -1,0 +1,490 @@
+--- Smelturtle: a turtle that smelts wood into charcoal.
+--- The smeltery collects wood and other stuff from the turtles (and reclamation chest),
+--- then smelts the wood into charcoal.
+--- 
+--- To begin, it crafts some logs into planks, then uses those as fuel.
+
+local expect = require "cc.expect".expect
+
+local dir = require "filesystem":programPath()
+local minilogger = require "minilogger"
+local _log = minilogger.new("Smelturtle")
+local catpuccin = require "catppuccin"
+local palette = catpuccin.set_palette("frappe")
+minilogger.set_log_level(... and minilogger.LOG_LEVELS[(...):upper()] or minilogger.LOG_LEVELS.INFO)
+term.setBackgroundColor(palette.crust)
+term.setTextColor(palette.text)
+term.clear()
+
+local fuckyouwindow = window.create(term.current(), 0, 0, 100, 1, false)
+minilogger.set_log_window(fuckyouwindow)
+
+--#region Constants
+
+--- The item IDs of saplings that the turtle will plant.
+---@type id_lookup
+local SAPLING_IDS = {
+  ["minecraft:oak_sapling"] = true,
+  ["minecraft:spruce_sapling"] = true,
+  ["minecraft:birch_sapling"] = true,
+  ["minecraft:jungle_sapling"] = true,
+  ["minecraft:acacia_sapling"] = true,
+  ["minecraft:dark_oak_sapling"] = true,
+  ["minecraft:cherry_sapling"] = true,
+  ["sc-goodies:sakura_sapling"] = true,
+  ["sc-goodies:maple_sapling"] = true,
+  ["sc-goodies:blue_sapling"] = true
+}
+
+--- The item IDs of logs that the turtle will cut down.
+---@type id_lookup
+local LOG_IDS = {
+  ["minecraft:oak_log"] = true,
+  ["minecraft:spruce_log"] = true,
+  ["minecraft:birch_log"] = true,
+  ["minecraft:jungle_log"] = true,
+  ["minecraft:acacia_log"] = true,
+  ["minecraft:dark_oak_log"] = true,
+  ["minecraft:mangrove_log"] = true,
+  ["minecraft:cherry_log"] = true,
+  ["sc-goodies:sakura_log"] = true,
+  ["sc-goodies:maple_log"] = true,
+  ["sc-goodies:blue_log"] = true
+}
+
+--- The item IDs of planks that the turtle may craft.
+---@type id_lookup
+local PLANK_IDS = {
+  ["minecraft:oak_planks"] = true,
+  ["minecraft:spruce_planks"] = true,
+  ["minecraft:birch_planks"] = true,
+  ["minecraft:jungle_planks"] = true,
+  ["minecraft:acacia_planks"] = true,
+  ["minecraft:dark_oak_planks"] = true,
+  ["minecraft:mangrove_planks"] = true,
+  ["minecraft:cherry_planks"] = true,
+  ["sc-goodies:sakura_planks"] = true,
+  ["sc-goodies:maple_planks"] = true,
+  ["sc-goodies:blue_planks"] = true
+}
+
+--- The item IDs of "good" fuels that will be sent to turtles for refueling.
+---@type id_lookup
+local FUEL_IDS = {
+  ["minecraft:charcoal_block"] = true
+}
+
+---@alias fuel_lookup table<string, integer> Maps fuel to their burn time.
+
+--- The item IDs of fuels that will be used in smelting, mapped to their burn time (in ticks).
+---@type fuel_lookup
+local SMELT_FUEL_IDS = {
+  ["minecraft:coal"] = 1600,
+  ["minecraft:charcoal"] = 1600,
+  ["minecraft:lava_bucket"] = 20000,
+  ["minecraft:coal_block"] = 16000,
+  ["minecraft:charcoal_block"] = 16000,
+  ["minecraft:dried_kelp_block"] = 4000,
+  ["minecraft:blaze_rod"] = 2400,
+}
+for name in pairs(PLANK_IDS) do
+  SMELT_FUEL_IDS[name] = 300
+end
+
+--- The amount of time it takes to smelt a single item, in ticks.
+local SMELT_TIME = 200
+
+--- The size of the screen.
+local T_W, T_H = term.getSize()
+
+--- The main window drawn to.
+local MAIN_WINDOW = window.create(term.current(), 1, 1, T_W, T_H)
+
+--- The config file.
+local CONFIG_FILE = dir:file("smelturtle.cfg")
+
+--#endregion Constants
+
+--#region Configuration
+
+---@class smelturtle_config
+---@field turtle_storages string[] The names of inventories that are connected to turtles.
+---@field reclamation_chest string? The name of the inventory that is connected to the 'reclamation' chest, if one is present.
+---@field storages string[] The names of inventories used as general-purpose storage.
+---@field furnaces string[] The names of inventories which are furnaces.
+local config = {
+  turtle_storages = {},
+  reclamation_chest = nil,
+  storages = {},
+  furnaces = {}
+}
+
+
+
+--- Loads the configuration from the config file.
+local function load_config()
+  config = CONFIG_FILE:unserialize(config)
+end
+
+
+
+--- Saves the configuration to the config file.
+local function save_config()
+  CONFIG_FILE:serialize(config, {compact=true})
+end
+
+
+--#endregion Configuration
+
+--#region Helper Functions
+
+
+local help_displaying = false
+
+
+--- Pull multiple events.
+---@param ... string The events to pull.
+---@return string event The event pulled.
+---@return any ... The arguments of the event.
+local function pull_events(...)
+  local ev = {}
+
+  local function is_event(event, ...)
+    for i = 1, select("#", ...) do
+      if event[1] == select(i, ...) then
+        return true
+      end
+    end
+    return false
+  end
+
+  repeat
+    ev = table.pack(os.pullEvent())
+  until is_event(ev, ...)
+
+  return table.unpack(ev)
+end
+
+
+
+--- Renders the main background, with nothing on it.
+---@param win Window The window to render to.
+local function render_background(win)
+  local function draw_box(x, y, w, h, color)
+    win.setBackgroundColor(color)
+    local txt =  (' '):rep(w)
+
+    for _y = 0, h - 1 do
+      win.setCursorPos(x, y + _y)
+      win.write(txt)
+    end
+  end
+
+  -- First: 12x6, top left.
+  draw_box(1, 1, 12, 6, palette.base)
+
+  -- Second: 25x6, top right.
+  draw_box(15, 1, 25, 6, palette.base)
+
+  -- Third: 12x6, bottom left.
+  draw_box(1, 8, 12, 6, palette.base)
+
+  -- Fourth: 25x6, bottom right.
+  draw_box(15, 8, 25, 6, palette.base)
+
+  -- Storages sub-box: 16, 3, 23x3
+  draw_box(16, 3, 23, 3, palette.surface_0)
+
+  -- Scroll arrows (both 'disabled')
+  win.setCursorPos(38, 3)
+  win.setTextColor(palette.subtext_1)
+  win.write("\x18")
+  win.setCursorPos(38, 5)
+  win.write("\x19")
+
+
+  -- Turtle storages sub-box: 16, 10, 23x3
+  draw_box(16, 10, 23, 3, palette.surface_0)
+
+  -- Scroll arrows (both 'disabled')
+  win.setCursorPos(38, 10)
+  win.write("\x18")
+  win.setCursorPos(38, 12)
+  win.write("\x19")
+
+  -- Furnaces sub-box: 2, 10, 10x3
+  draw_box(2, 10, 10, 3, palette.surface_0)
+
+  -- Scroll arrows (both 'disabled')
+  win.setCursorPos(11, 10)
+  win.write("\x18")
+  win.setCursorPos(11, 12)
+  win.write("\x19")
+
+  -- Storages Label: 16, 1
+  win.setCursorPos(16, 1)
+  win.setBackgroundColor(palette.base)
+  win.setTextColor(palette.blue)
+  win.write("Storages")
+  win.setCursorPos(16, 2)
+  win.write(("\x83"):rep(8))
+
+  -- Turtle Storages Label: 16, 8
+  win.setCursorPos(16, 8)
+  win.write("Turtle Storages")
+  win.setCursorPos(16, 9)
+  win.write(("\x83"):rep(15))
+
+  -- Furnaces Label: 2, 8
+  win.setCursorPos(2, 8)
+  win.write("Furnaces")
+  win.setCursorPos(2, 9)
+  win.write(("\x83"):rep(8))
+
+  -- Main counts labels
+  win.setCursorPos(1, 3)
+  win.setTextColor(palette.text)
+  win.write("CCoal :") -- Charcoal
+  win.setCursorPos(1, 4)
+  win.write("Logs  :")
+  win.setCursorPos(1, 5)
+  win.write("Planks:")
+  win.setCursorPos(1, 6)
+  win.write("Sapls :") -- Saplings
+
+  -- The state, centered within x={1,12}
+  -- Initial state is just "INIT" in red.
+  win.setCursorPos(5, 1)
+  win.setTextColor(palette.red)
+  win.write("INIT")
+
+  -- Draw the smaller lines in-between each box.
+  win.setBackgroundColor(palette.mantle)
+  win.setTextColor(palette.crust)
+  win.setCursorPos(1, 7)
+  win.write(("\x8c"):rep(T_W))
+  for y = 1, T_H do
+    win.setCursorPos(14, y)
+    win.write("\x95")
+  end
+  win.setCursorPos(14, 7)
+  win.write("\x9d")
+
+  win.setBackgroundColor(palette.crust)
+  win.setTextColor(palette.mantle)
+  for y = 1, T_H do
+    win.setCursorPos(13, y)
+    win.write("\x95")
+  end
+  win.setCursorPos(13, 7)
+  win.write("\x91")
+
+  -- Lock messages
+  win.setCursorPos(6, 13)
+  win.setTextColor(palette.green)
+  win.setBackgroundColor(palette.overlay_0)
+  win.write(" LOCK ")
+
+  win.setCursorPos(33, 13)
+  win.write(" LOCK ")
+
+  win.setCursorPos(33, 6)
+  win.write(" LOCK ")
+end
+
+
+
+--- Displays the help screens for setup.
+local function display_help()
+  help_displaying = true
+
+  local pages_needed = 6 -- Tweaked as I need more help pages.
+  local long_window = window.create(term.current(), T_W + 1, 1, T_W * pages_needed, T_H)
+  local pages = {}
+  for i = 0, pages_needed - 1 do
+    pages[i + 1] = window.create(long_window, T_W * i + 1, 1, T_W, T_H)
+    pages[i + 1].setBackgroundColor(palette.crust)
+    pages[i + 1].setTextColor(palette.text)
+    pages[i + 1].clear()
+  end
+  long_window.setTextColor(palette.text)
+  long_window.setBackgroundColor(palette.crust)
+  long_window.clear()
+
+  --- Max width of the centered text.
+  local max_width = 36
+
+  --- Split a message by newlines.
+  ---@param message string The message to split.
+  ---@return string[] lines The lines of the message.
+  local function split_lines(message)
+    local lines = {}
+    for line in message:gmatch("[^\n]+") do
+      table.insert(lines, line)
+    end
+    return lines
+  end
+
+  --- Split a message by words, based on the maximum width.
+  ---@param message string The message to split.
+  ---@return string[] lines The lines of the message.
+  local function split_words(message)
+    local lines = {}
+    local curr_line = ""
+    for word in message:gmatch("%S+") do
+      if #curr_line + #word + 1 > max_width then
+        table.insert(lines, curr_line)
+        if #word > max_width then
+          repeat
+            curr_line = word:sub(1, max_width)
+            table.insert(lines, curr_line)
+            word = word:sub(max_width + 1)
+          until #word <= max_width
+        end
+        curr_line = word
+      else
+        curr_line = curr_line .. " " .. word
+      end
+    end
+    table.insert(lines, curr_line)
+    return lines
+  end
+
+  --- Write a message to the center of the window.
+  ---@param page Window The window to write to.
+  ---@param message string The message to write.
+  ---@param color color? The color to write the message in.
+  ---@param offy number? The y offset to write the message at.
+  local function write_centered(page, message, color, offy)
+    -- Split the message on newlines and words.
+    local lines = split_lines(message)
+    local finished = {}
+    for _, line in ipairs(lines) do
+      for _, finished_line in ipairs(split_words(line)) do
+        table.insert(finished, finished_line)
+      end
+    end
+
+    -- Write the lines to the page.
+    local y_start = math.ceil(T_H / 2 - #finished / 2 + 0.5) + (offy or 0)
+    for i, line in ipairs(finished) do
+      local x_start = math.ceil(T_W / 2 - #line / 2 + 0.5)
+      page.setCursorPos(x_start, y_start + i - 1)
+      local old = page.getTextColor()
+      if color then
+        page.setTextColor(color)
+      end
+      page.write(line)
+
+      if color then
+        page.setTextColor(old)
+      end
+    end
+  end
+
+  --- Tween a value from A to B, using square easing.
+  ---@param a number The starting value.
+  ---@param b number The ending value.
+  ---@param t number The time, from 0 to 1.
+  ---@return number value The value at time t.
+  local function tween(a, b, t)
+    return a + (b - a) * t^2
+  end
+
+  -- Write the help pages.
+  write_centered(pages[1], "Welcome to Smelturtle! This program requires an advanced turtle.", nil, -2)
+  write_centered(pages[1], "Click anywhere or press any key to continue.", palette.green, 3)
+  write_centered(pages[2], "To begin, Smelturtle will be in the \"Setup\" state. In this state, you need to set the following:", nil, -4)
+  write_centered(pages[2], "1. The inventories used as the general storage.\n2. The inventory used for reclamation.\n3. The inventories connected to turtles.\n4. The furnaces to use.", palette.blue, 2)
+  write_centered(pages[3], "When setting the storages, clicking once will designate the inventory as a general storage.", nil, -4)
+  write_centered(pages[3], "Clicking again will designate the inventory as a reclamation inventory (only one can be present).", palette.blue)
+  write_centered(pages[3], "Clicking a third time will clear the selection.", palette.red, 4)
+  write_centered(pages[4], "A reclamation inventory is NOT required.", palette.yellow, 1)
+  write_centered(pages[5], "When setting the turtle storages and furnaces, clicking once will designate it as a turtle storage.", nil, -2)
+  write_centered(pages[5], "Clicking again will clear the selection.", palette.red, 3)
+  write_centered(pages[6], "Enjoy!", palette.green)
+
+  local anim_duration = 0.65
+  local current_page = 0
+
+  --- Animates a new page in, by tweening the page to the left T_W characters.
+  local function animate_page_in()
+    local c_x = long_window.getPosition()
+    local start_time = os.clock()
+    while os.clock() - start_time < anim_duration do
+      local t = (os.clock() - start_time) / anim_duration
+      for i = 1, pages_needed do
+        long_window.setVisible(false)
+        long_window.reposition(tween(c_x, c_x - T_W, t), 1)
+        long_window.setVisible(true)
+      end
+      sleep()
+    end
+
+    current_page = current_page + 1
+    -- Ensure the page is properly in position.
+    long_window.reposition(T_W - T_W * current_page + 1, 1)
+  end
+
+  MAIN_WINDOW.setBackgroundColor(palette.crust)
+  MAIN_WINDOW.clear()
+  MAIN_WINDOW.setVisible(false)
+
+  for _ = 1, pages_needed do
+    animate_page_in()
+    pull_events("mouse_click", "key")
+  end
+
+  animate_page_in()
+
+  local old_palette = {}
+  local crust_r, crust_g, crust_b = term.getPaletteColor(palette.crust)
+  for i = 0, 15 do
+    old_palette[i] = {term.getPaletteColor(2^i)}
+    term.setPaletteColor(2^i, crust_r, crust_g, crust_b)
+  end
+
+  render_background(MAIN_WINDOW)
+  MAIN_WINDOW.setVisible(true)
+
+  -- Le epic fade-in
+  local start_time = os.clock()
+  anim_duration = 1
+  while os.clock() - start_time < anim_duration do
+    local t = (os.clock() - start_time) / anim_duration
+    for i = 0, 15 do
+      term.setPaletteColor(2^i, tween(crust_r, old_palette[i][1], t), tween(crust_g, old_palette[i][2], t), tween(crust_b, old_palette[i][3], t))
+    end
+    sleep()
+  end
+end
+
+
+
+--- Checks all the turtle inventories for items to take back. Takes back any items found.
+--- Leaves the following in the inventories:
+--- 1. Fuel, x16
+--- 2. Saplings, x16
+---@return integer count The number of *logs* taken back.
+local function take_back_items()
+  for _, inventory in ipairs({}) do end return 0
+end
+
+--#endregion Helper Functions
+
+--#region Main Functions
+
+
+
+--#endregion Main Functions
+
+--#region Main Program
+
+load_config()
+
+if not next(config.furnaces) or not next(config.storages) or not next(config.turtle_storages) then
+  display_help()
+  sleep(30)
+end
+
+--#endregion Main Program
