@@ -198,33 +198,6 @@ local turtle_state = {
 
 
 
---- Checks how many items are in the turtle's inventory.
----@return integer item_count The number of items in the turtle's inventory.
-local function count_inventory()
-  local count = 0
-  for i = 1, 16 do
-    count = count + turtle.getItemCount(i)
-  end
-  return count
-end
-
-
-
---- Gets all items in the turtle's inventory.
----@return table<integer, item> items The items in the turtle's inventory.
-local function get_inventory()
-  local items = {}
-  for i = 1, 16 do
-    local item = turtle.getItemDetail(i)
-    if item then
-      items[i] = item
-    end
-  end
-  return items
-end
-
-
-
 --- Locates the given items in the turtle's inventory.
 ---@param item_ids id_lookup The item IDs to locate.
 ---@return integer[] slots The slots that contain the items.
@@ -271,18 +244,6 @@ local function find_like_item(item_id)
   end
 
   return slots
-end
-
-
-
---- Determines the last used slot in the turtle's inventory.
----@return integer? slot The last used slot, or nil if no slots are used.
-local function last_used_slot()
-  for i = 16, 1, -1 do
-    if turtle.getItemCount(i) > 0 then
-      return i
-    end
-  end
 end
 
 
@@ -343,6 +304,10 @@ local function condense_inventory()
         turtle.transferTo(first_empty)
       end
     end
+  end
+
+  if not first_empty_slot() then
+    _log.warn("Inventory is full.")
   end
 
   reselect()
