@@ -256,6 +256,37 @@ end
 
 
 
+--- Finds the indices of all items like the given item.
+---@param item_id string The item ID to find.
+---@return integer[] slots The slots that contain the items.
+local function find_like_item(item_id)
+  expect(1, item_id, "string")
+
+  local slots = {}
+  for i = 1, 16 do
+    local item = turtle.getItemDetail(i)
+    if item and item.name == item_id then
+      table.insert(slots, i)
+    end
+  end
+
+  return slots
+end
+
+
+
+--- Determines the last used slot in the turtle's inventory.
+---@return integer? slot The last used slot, or nil if no slots are used.
+local function last_used_slot()
+  for i = 16, 1, -1 do
+    if turtle.getItemCount(i) > 0 then
+      return i
+    end
+  end
+end
+
+
+
 --- Selects the first slot.
 local function reselect()
   turtle.select(1)
@@ -263,97 +294,55 @@ end
 
 
 
---- Dumps the inventory of the turtle to a chest or other inventory.
----@return boolean success Whether the inventory was dumped successfully.
-local function dump_inventory()
-  _log.info("Dumping inventory...")
-  _log.debug("Sleeping a little bit to ensure the turtle registers the inventory.")
-  sleep(0.25)
-  local inv = peripheral.find("inventory") --[[@as Inventory? ]]
-  local modem = peripheral.wrap("bottom") --[[@as WiredModem? ]]
-
-  if not inv then
-    _log.error("No inventory found.")
-    return false
-  end
-
-  if not modem then
-    _log.error("No modem found.")
-    return false
-  end
-
-  local self_name = modem.getNameLocal()
-
-  if not self_name then
-    _log.error("Modem is not activated!")
-    return false
-  end
-
-  --- Functions to run for parallel
-  ---@type function[]
+local item_stack_limits = {}
+--- Collects the stack limits of items in the turtle's inventory.
+local function collect_stack_limits()
   local funcs = {}
 
-  local t_inv = get_inventory()
-  local found_saplings = false
-  local found_fuel = false
   for i = 1, 16 do
-    table.insert(funcs, function()
-      if t_inv[i] then
-        local count = 64
-        if SAPLING_IDS[t_inv[i].name] and not found_saplings then
-          found_saplings = true
-          count = t_inv[i].count - 8 -- Keep 8 saplings!
-        end
-        if FUEL_IDS[t_inv[i].name] and not found_fuel then
-          found_fuel = true
-          count = 0 -- Keep a single stack of fuel!
-        end
+    local item = turtle.getItemDetail(i)
 
-        inv.pullItems(self_name, i, count)
-      end
-    end)
+    if item and not item_stack_limits[item.name] then
+      table.insert(funcs, function()
+        turtle.select(i)
+        item_stack_limits[item.name] = turtle.getItemSpace(i) + item.count
+      end)
+    end
+
+    parallel.waitForAll(table.unpack(funcs))
   end
-
-  parallel.waitForAll(table.unpack(funcs))
-
-  _log.okay("Inventory dumped.")
-  return true
 end
 
 
 
---- Sorts the inventory (Moves fuel to slot 1, saplings to slot 2)
-local function sort_inventory()
-  _log.info("Sorting inventory...")
+--- Condenses items in the inventory.
+local function condense_inventory()
+  collect_stack_limits()
 
-  local first_empty = first_empty_slot()
-  if not first_empty then
-    _log.error("No empty slots found.")
-    return
+  -- Step 1: Condense all items into their respective stacks.
+  for current_slot = 16, 1, -1 do
+    local item = turtle.getItemDetail(current_slot)
+    if item then
+      local slots = find_like_item(item.name)
+      for _, slot in ipairs(slots) do
+        if slot < current_slot then -- Only move items from higher slots to lower slots.
+          turtle.select(current_slot)
+          turtle.transferTo(slot)
+        end
+      end
+    end
   end
 
-  -- Transfer the fuel to slot 1
-  local slots = locate_items(FUEL_IDS)
-  if #slots > 0 and slots[1] ~= 1 then
-    reselect()
-    turtle.transferTo(first_empty)
-    turtle.select(slots[1])
-    turtle.transferTo(1)
-  end
-
-  -- Transfer the saplings to slot 2
-  slots = locate_items(SAPLING_IDS)
-  local next_empty = first_empty_slot()
-  if not next_empty then
-    _log.error("No empty slots found.")
-    return
-  end
-
-  if #slots > 0 and slots[1] ~= 2 then
-    turtle.select(2)
-    turtle.transferTo(next_empty)
-    turtle.select(slots[1])
-    turtle.transferTo(2)
+  -- Step 2: Move all remaining items to be in the first slots.
+  for current_slot = 16, 1, -1 do
+    local item = turtle.getItemDetail(current_slot)
+    if item then
+      local first_empty = first_empty_slot()
+      if first_empty and first_empty < current_slot then
+        turtle.select(current_slot)
+        turtle.transferTo(first_empty)
+      end
+    end
   end
 
   reselect()
@@ -915,8 +904,7 @@ local function main()
   end
 
   -- Assuming we are back at the start position now, we should start with an optimal inventory.
-  dump_inventory()
-  sort_inventory()
+  condense_inventory()
 
   while true do
     plant_sapling()
@@ -927,8 +915,7 @@ local function main()
     end
 
     dig_tree()
-    dump_inventory()
-    sort_inventory()
+    condense_inventory()
   end
 end
 
