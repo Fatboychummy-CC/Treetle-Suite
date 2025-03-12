@@ -830,6 +830,9 @@ local function plant_sapling()
     if is_sapling then
       _log.okay("There is a sapling in front of the turtle.")
       return
+    elseif is_log then
+      _log.okay("There is a log in front of the turtle.")
+      return
     end
 
     sleep(30) -- Failing to plant a sapling for another reason means something is likely blocking it,
