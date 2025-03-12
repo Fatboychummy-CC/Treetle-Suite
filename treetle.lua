@@ -934,7 +934,6 @@ end
 --- ########################################
 local function info()
   term.setBackgroundColor(palette.crust)
-  term.clear()
 
   local state_lookup = {}
   for k, v in pairs(STATES) do
@@ -1045,6 +1044,9 @@ end
 
 --#region Main Program
 
+term.setBackgroundColor(palette.crust)
+term.setTextColor(palette.text)
+term.clear()
 _log.info("Log started at", os.epoch "utc")
 _log.info("Treetle starting...")
 
