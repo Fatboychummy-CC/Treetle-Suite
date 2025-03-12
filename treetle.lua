@@ -198,52 +198,78 @@ local turtle_state = {
 
 
 
+--- Collects info about all items in the turtle's inventory.
+---@return table<integer, item> items The items in the turtle's inventory.
+local function get_items()
+  local items = {}
+
+  for i = 1, 16 do
+    items[i] = turtle.getItemDetail(i)
+  end
+
+  return items
+end
+
+
+
 --- Locates the given items in the turtle's inventory.
 ---@param item_ids id_lookup The item IDs to locate.
+---@param items table<integer, item>? The items in the turtle's inventory. If not provided, will search manually (takes time).
 ---@return integer[] slots The slots that contain the items.
-local function locate_items(item_ids)
+local function locate_items(item_ids, items)
   expect(1, item_ids, "table")
 
   local slots = {}
-  for i = 1, 16 do
-    local item = turtle.getItemDetail(i)
-    if item and item_ids[item.name] then
-      table.insert(slots, i)
+
+  if items then
+    for slot, item in pairs(items) do
+      if item and item_ids[item.name] then
+        table.insert(slots, slot)
+      end
+    end
+  else
+    for slot = 1, 16 do
+      local item = turtle.getItemDetail(slot)
+      if item and item_ids[item.name] then
+        table.insert(slots, slot)
+      end
     end
   end
 
   return slots
+end
+
+
+
+--- Shorthand to find a single item in the turtle's inventory.
+---@param item_id string The item ID to locate.
+---@param items table<integer, item>? The items in the turtle's inventory. If not provided, will search manually (takes time).
+---@return integer[] slots The slots that contain the item.
+local function locate_item(item_id, items)
+  expect(1, item_id, "string")
+
+  return locate_items({ [item_id] = true }, items)
 end
 
 
 
 --- Determines the first empty slot in the turtle's inventory.
+---@param items table<integer, item>? The items in the turtle's inventory. If not provided, will search manually (takes time).
 ---@return integer? slot The first empty slot, or nil if no slots are empty.
-local function first_empty_slot()
-  for i = 1, 16 do
-    if turtle.getItemCount(i) == 0 then
-      return i
+local function first_empty_slot(items)
+  if items then
+    for i = 1, 16 do
+      if not items[i] then
+        return i
+      end
+    end
+  else
+    for i = 1, 16 do
+      if turtle.getItemCount(i) == 0 then
+        return i
+      end
     end
   end
-end
-
-
-
---- Finds the indices of all items like the given item.
----@param item_id string The item ID to find.
----@return integer[] slots The slots that contain the items.
-local function find_like_item(item_id)
-  expect(1, item_id, "string")
-
-  local slots = {}
-  for i = 1, 16 do
-    local item = turtle.getItemDetail(i)
-    if item and item.name == item_id then
-      table.insert(slots, i)
-    end
-  end
-
-  return slots
 end
 
 
@@ -257,20 +283,23 @@ end
 
 local item_stack_limits = {}
 --- Collects the stack limits of items in the turtle's inventory.
-local function collect_stack_limits()
-  local funcs = {}
-
-  for i = 1, 16 do
-    local item = turtle.getItemDetail(i)
-
-    if item and not item_stack_limits[item.name] then
-      table.insert(funcs, function()
-        turtle.select(i)
-        item_stack_limits[item.name] = turtle.getItemSpace(i) + item.count
-      end)
+---@param items table<integer, item>? The items in the turtle's inventory. If not provided, will search manually (takes time).
+local function collect_stack_limits(items)
+  if items then
+    for _, item in pairs(items) do
+      if item and not item_stack_limits[item.name] then
+        item_stack_limits[item.name] = turtle.getItemSpace(item.slot) + item.count
+      end
     end
+    return
+  else
+    for i = 1, 16 do
+      local item = turtle.getItemDetail(i)
 
-    parallel.waitForAll(table.unpack(funcs))
+      if item and not item_stack_limits[item.name] then
+        item_stack_limits[item.name] = turtle.getItemSpace(i) + item.count
+      end
+    end
   end
 end
 
@@ -278,17 +307,29 @@ end
 
 --- Condenses items in the inventory.
 local function condense_inventory()
-  collect_stack_limits()
+  local items = get_items()
+
+  collect_stack_limits(items)
 
   -- Step 1: Condense all items into their respective stacks.
   for current_slot = 16, 1, -1 do
-    local item = turtle.getItemDetail(current_slot)
+    local item = items[current_slot]
     if item then
-      local slots = find_like_item(item.name)
+      local slots = locate_item(item.name)
       for _, slot in ipairs(slots) do
         if slot < current_slot then -- Only move items from higher slots to lower slots.
-          turtle.select(current_slot)
+          if turtle.getSelectedSlot() ~= current_slot then
+            turtle.select(current_slot)
+          end
           turtle.transferTo(slot)
+
+          -- The turtle's inventory changed, so let's update the items table.
+          items = get_items()
+
+          -- And if we moved everything from this slot, we can stop.
+          if not items[current_slot] then
+            break
+          end
         end
       end
     end
