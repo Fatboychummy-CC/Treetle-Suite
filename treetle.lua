@@ -165,6 +165,10 @@ local FACINGS = {
   NX = 3
 }
 
+--- The communication channel for Treetle.
+---@type integer
+local TREETLE_CHANNEL = 35000
+
 local T_W, T_H = term.getSize()
 
 --- The information window hosts the position, facing, and fuel level of the turtle.
@@ -871,6 +875,10 @@ local function wait_for_tree()
 end
 
 
+--- Used for inter-thread communication between the communication thread and the main thread.
+--- Determines if the turtle can run.
+---@type boolean
+local can_run = false
 
 --- Main loop
 local function main()
@@ -917,12 +925,24 @@ local function main()
 
   while true do
     plant_sapling()
+
+    _log.info("Halting until run signal.")
+    parallel.waitForAny(function()
+      while not can_run do
+        os.pullEvent("treetle_run")
+      end
+    end, function()
+      sleep(60) -- Timeout thread
+      _log.warn("Timeout reached. Is Controltle alive?")
+    end)
+
     wait_for_tree()
 
     if turtle.getFuelLevel() < REFUEL_TO then
       refuel()
     end
 
+    can_run = false
     dig_tree()
     condense_inventory()
   end
@@ -1042,6 +1062,106 @@ local function info()
   end
 end
 
+
+
+local connected = false
+local comms_log = minilogger.new("Comms")
+--- Communication handler thread loop
+--- Responds to inventory requests.
+local function communication_handler()
+  local modem
+
+  --- Attempts to wrap the wired modem, returns whether it was successful.
+  ---@return boolean success Whether the modem was successfully wrapped.
+  local function wrap_modem()
+    modem = peripheral.hasType("bottom", "peripheral_hub") and peripheral.wrap("bottom") --[[@as WiredModem?]]
+    if modem then modem.open(TREETLE_CHANNEL) end
+    comms_log.debug(modem and "Modem connected." or "Modem disconnected.")
+    return modem and true or false
+  end
+
+
+
+  --- Pull multiple events.
+  ---@param ... string The events to pull.
+  ---@return string event The event pulled.
+  ---@return any ... The arguments of the event.
+  local function pull_events(...)
+    local ev = {}
+
+    local function is_event(event, ...)
+      for i = 1, select("#", ...) do
+        if event[1] == select(i, ...) then
+          return true
+        end
+      end
+      return false
+    end
+
+    repeat
+      ev = table.pack(os.pullEvent())
+    until is_event(ev, ...)
+
+    return table.unpack(ev)
+  end
+
+
+
+  local function wait_for_modem()
+    while not connected do
+      local ev, periph = os.pullEvent("peripheral")
+      if ev == "peripheral" and periph == "bottom" then
+        connected = wrap_modem()
+      end
+    end
+  end
+
+
+  while true do
+    if not wrap_modem() then
+      wait_for_modem()
+    else
+      connected = true
+    end
+
+    while connected do
+      local event = table.pack(pull_events("modem_message", "peripheral_detach", "peripheral"))
+
+      if event[1] == "peripheral" or event[1] == "peripheral_detach" and event[2] == "bottom" then
+        connected = wrap_modem()
+      elseif event[1] == "modem_message" then
+        local modem_side, channel, reply_channel, message = table.unpack(event, 2)
+        comms_log.debug("Received message:", modem_side, channel, reply_channel, textutils.serialize(message, {compact=true}))
+
+        if modem_side == "bottom" and channel == TREETLE_CHANNEL then
+          if type(message) == "table" then
+            if message.action == "inventory_request" and message.turtle_id == os.getComputerID() then
+              comms_log.debug("Received inventory request.")
+              local items = get_items()
+              modem.transmit(reply_channel, TREETLE_CHANNEL, {
+                action = "inventory_response",
+                turtle_id = os.getComputerID(),
+                items = items
+              })
+            elseif message.action == "discover_treetles" then
+              comms_log.debug("Received treetle discovery request.")
+              modem.transmit(reply_channel, TREETLE_CHANNEL, {
+                action = "treetle_discovery",
+                turtle_id = os.getComputerID()
+              })
+            elseif message.action == "go" and message.turtle_id == os.getComputerID() then
+              comms_log.debug("Received run signal.")
+              can_run = true
+              os.queueEvent("treetle_run")
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+
 --#endregion Main Methods
 
 
@@ -1066,7 +1186,8 @@ end
 local ok, err = pcall(
   parallel.waitForAny,
     main,
-    info
+    info,
+    communication_handler
 )
 
 if not ok then
