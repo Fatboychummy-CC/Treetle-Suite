@@ -1,4 +1,4 @@
---- Smelturtle: a turtle that smelts wood into charcoal.
+--- Controltle: a turtle that smelts wood into charcoal.
 --- The smeltery collects wood and other stuff from the turtles (and reclamation chest),
 --- then smelts the wood into charcoal.
 --- 
@@ -8,7 +8,7 @@ local expect = require "cc.expect".expect
 
 local dir = require "filesystem":programPath()
 local minilogger = require "minilogger"
-local _log = minilogger.new("Smelturtle")
+local _log = minilogger.new("Controltle")
 local catppuccin = require "catppuccin"
 local palette = catppuccin.set_palette("mocha")
 minilogger.set_log_level(... and minilogger.LOG_LEVELS[(...):upper()] or minilogger.LOG_LEVELS.INFO)
@@ -101,19 +101,19 @@ local T_W, T_H = term.getSize()
 local MAIN_WINDOW = window.create(term.current(), 1, 1, T_W, T_H)
 
 --- The config file.
-local CONFIG_FILE = dir:file("smelturtle.cfg")
+local CONFIG_FILE = dir:file("controltle.cfg")
 
 --#endregion Constants
 
 --#region Configuration
 
----@class smelturtle_config
----@field turtles string[] The names of turtles that are connected to the system.
----@field reclamation_chest string? The name of the inventory that is connected to the 'reclamation' chest, if one is present.
+---@class controltle_config
+---@field intermediate_chest string? The name of the inventory that is designated as the intermediate chest. This chest is used to pull items from turtles.
+---@field reclamation_chest string? The name of the inventory that is designated as the 'reclamation' chest, if one is present.
 ---@field storages string[] The names of inventories used as general-purpose storage.
 ---@field furnaces string[] The names of inventories which are furnaces.
 local config = {
-  turtles = {},
+  intermediate_chest = nil,
   reclamation_chest = nil,
   storages = {},
   furnaces = {}
@@ -232,11 +232,11 @@ local function render_background(win)
   win.setCursorPos(16, 2)
   win.write(("\x83"):rep(8))
 
-  -- Turtles Label: 16, 8
+  -- Intermediate Chest Label: 16, 8
   win.setCursorPos(16, 8)
-  win.write("Turtles")
+  win.write("Intermediate Chest")
   win.setCursorPos(16, 9)
-  win.write(("\x83"):rep(7))
+  win.write(("\x83"):rep(18))
 
   -- Furnaces Label: 2, 8
   win.setCursorPos(2, 8)
@@ -301,8 +301,8 @@ end
 local function display_help()
   help_displaying = true
 
-  local pages_needed = 6 -- Tweaked as I need more help pages.
-  local long_window = window.create(term.current(), T_W + 1, 1, T_W * pages_needed, T_H)
+  local pages_needed = 10 -- Tweaked as I need more help pages.
+  local long_window = window.create(term.current(), T_W + 1, 1, T_W * (pages_needed + 1), T_H)
   local pages = {}
   for i = 0, pages_needed - 1 do
     pages[i + 1] = window.create(long_window, T_W * i + 1, 1, T_W, T_H)
@@ -395,17 +395,39 @@ local function display_help()
   end
 
   -- Write the help pages.
-  write_centered(pages[1], "Welcome to Smelturtle! This program requires an advanced turtle.", nil, -2)
-  write_centered(pages[1], "Click anywhere or press any key to continue.", palette.green, 3)
-  write_centered(pages[2], "To begin, Smelturtle will be in the \"Setup\" state. In this state, you need to set the following:", nil, -4)
-  write_centered(pages[2], "1. The inventories used as the general storage.\n2. The inventory used for reclamation.\n3. The inventories connected to turtles.\n4. The furnaces to use.", palette.blue, 2)
-  write_centered(pages[3], "When setting the storages, clicking once will designate the inventory as a general storage.", nil, -4)
-  write_centered(pages[3], "Clicking again will designate the inventory as a reclamation inventory (only one can be present).", palette.blue)
-  write_centered(pages[3], "Clicking a third time will clear the selection.", palette.red, 4)
-  write_centered(pages[4], "A reclamation inventory is NOT required.", palette.yellow, 1)
-  write_centered(pages[5], "When setting the turtles and furnaces, clicking once will designate it as a turtle storage.", nil, -2)
-  write_centered(pages[5], "Clicking again will clear the selection.", palette.red, 3)
-  write_centered(pages[6], "Enjoy!", palette.green)
+  write_centered(pages[1], "Welcome to Controltle!", nil, -4)
+  write_centered(pages[1], "This program is made to work with Treetle, to slowly automate fuel creation!", palette.subtext_0)
+  write_centered(pages[1], "This program requires an advanced turtle.", palette.yellow, 4)
+
+  write_centered(pages[2], "In order to run Controltle, you will need to set up a few things. If you see 'SETUP' at the top left, you likely are missing something.", nil, 1)
+
+  write_centered(pages[3], "1. One 'intermediary' inventory to pull items from Treetles.", palette.blue, -1)
+  write_centered(pages[3], "This inventory is used due to a restriction in the way turtles are registered on the network.", nil, 2)
+
+  write_centered(pages[4], "2. At least one inventory to store items in.", palette.blue, -1)
+  write_centered(pages[4], "These inventories are used for storing anything coming into the system, including fuel, saplings, and anything else.", nil, 3)
+
+  write_centered(pages[5], "3. At least one furnace to smelt logs in.", palette.blue, -1)
+  write_centered(pages[5], "The usage of these should hopefully be obvious by the title.", nil, 2)
+
+  write_centered(pages[6], "4. An inventory to pull items from for reclamation.", palette.blue, -1)
+  write_centered(pages[6], "This is optional. Pipe all the extra tree drops to this chest.", nil, 2)
+
+  write_centered(pages[7], "When selecting the storages:", nil, -4)
+  write_centered(pages[7], "Click once to designate as storage.", palette.blue, -2)
+  write_centered(pages[7], "Click a second time to designate as reclamation chest.", palette.green, 1)
+  write_centered(pages[7], "Click a third time to remove the designation.", palette.red, 4)
+
+  write_centered(pages[8], "For both other selections:", nil, -3)
+  write_centered(pages[8], "Click once to designate as the given type.", palette.blue, 0)
+  write_centered(pages[8], "Click a second time to remove the designation.", palette.red, 3)
+
+  write_centered(pages[9], "Once you have set up all the inventories, click the 'LOCK' buttons to lock in the selections.", nil, -4)
+  write_centered(pages[9], "This prevents accidental changes to the setup.", palette.yellow, 1)
+
+  write_centered(pages[10], "If you need help or are having issues, please contact me on GitHub:", nil, -1)
+  write_centered(pages[10], "Fatboychummy-CC/Treetle-Suite", palette.blue, 2)
+  write_centered(pages[10], ("\x83"):rep(29), palette.blue, 3)
 
   local anim_duration = 0.65
   local current_page = 0
@@ -416,11 +438,9 @@ local function display_help()
     local start_time = os.clock()
     while os.clock() - start_time < anim_duration do
       local t = (os.clock() - start_time) / anim_duration
-      for i = 1, pages_needed do
-        long_window.setVisible(false)
-        long_window.reposition(tween(c_x, c_x - T_W, t), 1)
-        long_window.setVisible(true)
-      end
+      long_window.setVisible(false)
+      long_window.reposition(tween(c_x, c_x - T_W, t), 1)
+      long_window.setVisible(true)
       sleep()
     end
 
@@ -429,13 +449,47 @@ local function display_help()
     long_window.reposition(T_W - T_W * current_page + 1, 1)
   end
 
+  --- Animates a page backwards.
+  local function animate_page_out()
+    if current_page == 1 then
+      return
+    end
+
+    local c_x = long_window.getPosition()
+    local start_time = os.clock()
+    while os.clock() - start_time < anim_duration do
+      local t = (os.clock() - start_time) / anim_duration
+      long_window.setVisible(false)
+      long_window.reposition(tween(c_x, c_x + T_W, t), 1)
+      long_window.setVisible(true)
+      sleep()
+    end
+
+    current_page = current_page - 1
+    -- Ensure the page is properly in position.
+    long_window.reposition(T_W - T_W * current_page + 1, 1)
+  end
+
   MAIN_WINDOW.setBackgroundColor(palette.crust)
   MAIN_WINDOW.clear()
   MAIN_WINDOW.setVisible(false)
 
-  for _ = 1, pages_needed do
-    animate_page_in()
-    pull_events("mouse_click", "key")
+  animate_page_in() -- Bring in the first page.
+  while current_page <= pages_needed do
+    local ev, param = pull_events("mouse_click", "key_up")
+    if ev == "mouse_click" then
+      if param == 1 then
+        animate_page_in()
+      elseif param == 2 then
+        animate_page_out()
+      end
+    elseif ev == "key_up" then
+      if param == keys.enter or param == keys.space or param == keys.right or param == keys.d then
+        animate_page_in()
+      elseif param == keys.left or param == keys.a then
+        animate_page_out()
+      end
+    end
   end
 
   animate_page_in()
@@ -464,15 +518,16 @@ end
 
 
 
---- Checks all the turtle inventories for items to take back. Takes back any items found.
+--- Takes items from the given turtle
 --- Leaves the following in the inventories:
 --- 1. Fuel, x16
 --- 2. Saplings, x16
+---@param turtle_name string The name of the turtle to take items from.
 ---@return integer count The number of *logs* taken back.
-local function take_back_items()
-  for _, turtle in ipairs(config.turtles) do
-    return 0 -- TODO: Implement this.
-  end
+local function take_back_items(turtle_name)
+  expect(1, turtle_name, "string")
+
+  return 0 -- TODO: Implement this.
 end
 
 
@@ -484,9 +539,9 @@ end
 local ok, err = pcall(function()
   load_config()
 
-  --if not next(config.furnaces) or not next(config.storages) or not next(config.turtles) then
-  --  display_help()
-  --end
+  if not next(config.furnaces) or not next(config.storages) or not config.intermediate_chest then
+    display_help()
+  end
   render_background(MAIN_WINDOW)
 end)
 
