@@ -9,8 +9,8 @@ local expect = require "cc.expect".expect
 local dir = require "filesystem":programPath()
 local minilogger = require "minilogger"
 local _log = minilogger.new("Smelturtle")
-local catpuccin = require "catppuccin"
-local palette = catpuccin.set_palette("frappe")
+local catppuccin = require "catppuccin"
+local palette = catppuccin.set_palette("mocha")
 minilogger.set_log_level(... and minilogger.LOG_LEVELS[(...):upper()] or minilogger.LOG_LEVELS.INFO)
 term.setBackgroundColor(palette.crust)
 term.setTextColor(palette.text)
@@ -108,12 +108,12 @@ local CONFIG_FILE = dir:file("smelturtle.cfg")
 --#region Configuration
 
 ---@class smelturtle_config
----@field turtle_storages string[] The names of inventories that are connected to turtles.
+---@field turtles string[] The names of turtles that are connected to the system.
 ---@field reclamation_chest string? The name of the inventory that is connected to the 'reclamation' chest, if one is present.
 ---@field storages string[] The names of inventories used as general-purpose storage.
 ---@field furnaces string[] The names of inventories which are furnaces.
 local config = {
-  turtle_storages = {},
+  turtles = {},
   reclamation_chest = nil,
   storages = {},
   furnaces = {}
@@ -165,6 +165,9 @@ local function pull_events(...)
   return table.unpack(ev)
 end
 
+--#endregion Helper Functions
+
+--#region Main Functions
 
 
 --- Renders the main background, with nothing on it.
@@ -203,7 +206,7 @@ local function render_background(win)
   win.write("\x19")
 
 
-  -- Turtle storages sub-box: 16, 10, 23x3
+  -- Turtle sub-box: 16, 10, 23x3
   draw_box(16, 10, 23, 3, palette.surface_0)
 
   -- Scroll arrows (both 'disabled')
@@ -229,11 +232,11 @@ local function render_background(win)
   win.setCursorPos(16, 2)
   win.write(("\x83"):rep(8))
 
-  -- Turtle Storages Label: 16, 8
+  -- Turtles Label: 16, 8
   win.setCursorPos(16, 8)
-  win.write("Turtle Storages")
+  win.write("Turtles")
   win.setCursorPos(16, 9)
-  win.write(("\x83"):rep(15))
+  win.write(("\x83"):rep(7))
 
   -- Furnaces Label: 2, 8
   win.setCursorPos(2, 8)
@@ -244,13 +247,13 @@ local function render_background(win)
   -- Main counts labels
   win.setCursorPos(1, 3)
   win.setTextColor(palette.text)
-  win.write("CCoal :") -- Charcoal
+  win.write("CCoal :    -") -- Charcoal
   win.setCursorPos(1, 4)
-  win.write("Logs  :")
+  win.write("Logs  :    -")
   win.setCursorPos(1, 5)
-  win.write("Planks:")
+  win.write("Planks:    -")
   win.setCursorPos(1, 6)
-  win.write("Sapls :") -- Saplings
+  win.write("Sapls :    -") -- Saplings
 
   -- The state, centered within x={1,12}
   -- Initial state is just "INIT" in red.
@@ -400,7 +403,7 @@ local function display_help()
   write_centered(pages[3], "Clicking again will designate the inventory as a reclamation inventory (only one can be present).", palette.blue)
   write_centered(pages[3], "Clicking a third time will clear the selection.", palette.red, 4)
   write_centered(pages[4], "A reclamation inventory is NOT required.", palette.yellow, 1)
-  write_centered(pages[5], "When setting the turtle storages and furnaces, clicking once will designate it as a turtle storage.", nil, -2)
+  write_centered(pages[5], "When setting the turtles and furnaces, clicking once will designate it as a turtle storage.", nil, -2)
   write_centered(pages[5], "Clicking again will clear the selection.", palette.red, 3)
   write_centered(pages[6], "Enjoy!", palette.green)
 
@@ -467,12 +470,10 @@ end
 --- 2. Saplings, x16
 ---@return integer count The number of *logs* taken back.
 local function take_back_items()
-  for _, inventory in ipairs({}) do end return 0
+  for _, turtle in ipairs(config.turtles) do
+    return 0 -- TODO: Implement this.
+  end
 end
-
---#endregion Helper Functions
-
---#region Main Functions
 
 
 
@@ -480,11 +481,19 @@ end
 
 --#region Main Program
 
-load_config()
+local ok, err = pcall(function()
+  load_config()
 
-if not next(config.furnaces) or not next(config.storages) or not next(config.turtle_storages) then
-  display_help()
-  sleep(30)
+  --if not next(config.furnaces) or not next(config.storages) or not next(config.turtles) then
+  --  display_help()
+  --end
+  render_background(MAIN_WINDOW)
+end)
+
+if not ok then
+  pcall(catppuccin.reset_palette)
+  _log.error(err)
+  error(err)
 end
 
 --#endregion Main Program
