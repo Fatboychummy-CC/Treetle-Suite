@@ -422,8 +422,8 @@ local function display_help()
   write_centered(pages[8], "Click once to designate as the given type.", palette.blue, 0)
   write_centered(pages[8], "Click a second time to remove the designation.", palette.red, 3)
 
-  write_centered(pages[9], "Once you have set up all the inventories, click the 'LOCK' buttons to lock in the selections.", nil, -4)
-  write_centered(pages[9], "This prevents accidental changes to the setup.", palette.yellow, 1)
+  write_centered(pages[9], "Once you have set up all the inventories, click the 'LOCK' buttons to lock in the selections.", nil, -1)
+  write_centered(pages[9], "This prevents accidental changes to the setup.", palette.yellow, 3)
 
   write_centered(pages[10], "If you need help or are having issues, please contact me on GitHub:", nil, -1)
   write_centered(pages[10], "Fatboychummy-CC/Treetle-Suite", palette.blue, 2)
