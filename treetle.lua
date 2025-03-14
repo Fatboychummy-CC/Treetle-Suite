@@ -1129,27 +1129,19 @@ local function communication_handler()
 
       if event[1] == "peripheral" or event[1] == "peripheral_detach" and event[2] == "bottom" then
         connected = wrap_modem()
+        if connected then
+          modem.transmit(TREETLE_CHANNEL, TREETLE_CHANNEL, {
+            action = "treetle_discovery",
+            turtle_id = os.getComputerID()
+          })
+        end
       elseif event[1] == "modem_message" then
         local modem_side, channel, reply_channel, message = table.unpack(event, 2)
         comms_log.debug("Received message:", modem_side, channel, reply_channel, textutils.serialize(message, {compact=true}))
 
         if modem_side == "bottom" and channel == TREETLE_CHANNEL then
           if type(message) == "table" then
-            if message.action == "inventory_request" and message.turtle_id == os.getComputerID() then
-              comms_log.debug("Received inventory request.")
-              local items = get_items()
-              modem.transmit(reply_channel, TREETLE_CHANNEL, {
-                action = "inventory_response",
-                turtle_id = os.getComputerID(),
-                items = items
-              })
-            elseif message.action == "discover_treetles" then
-              comms_log.debug("Received treetle discovery request.")
-              modem.transmit(reply_channel, TREETLE_CHANNEL, {
-                action = "treetle_discovery",
-                turtle_id = os.getComputerID()
-              })
-            elseif message.action == "go" and message.turtle_id == os.getComputerID() then
+            if message.action == "go" and message.turtle_id == os.getComputerID() then
               comms_log.debug("Received run signal.")
               can_run = true
               os.queueEvent("treetle_run")
