@@ -1130,10 +1130,16 @@ local function communication_handler()
       if event[1] == "peripheral" or event[1] == "peripheral_detach" and event[2] == "bottom" then
         connected = wrap_modem()
         if connected then
-          modem.transmit(TREETLE_CHANNEL, TREETLE_CHANNEL, {
-            action = "treetle_discovery",
-            turtle_id = os.getComputerID()
-          })
+          local turtle_name = peripheral.call("bottom", "getNameLocal")
+          if turtle_name then
+            modem.transmit(TREETLE_CHANNEL, TREETLE_CHANNEL, {
+              action = "treetle_discovery",
+              turtle_name = turtle_name,
+              turtle_id = os.getComputerID()
+            })
+          else
+            comms_log.warn("Failed to get turtle ID.")
+          end
         end
       elseif event[1] == "modem_message" then
         local modem_side, channel, reply_channel, message = table.unpack(event, 2)
@@ -1141,7 +1147,7 @@ local function communication_handler()
 
         if modem_side == "bottom" and channel == TREETLE_CHANNEL then
           if type(message) == "table" then
-            if message.action == "go" and message.turtle_id == os.getComputerID() then
+            if message.action == "treetle_go" and message.turtle_id == os.getComputerID() then
               comms_log.debug("Received run signal.")
               can_run = true
               os.queueEvent("treetle_run")
@@ -1166,12 +1172,12 @@ _log.info("Log started at", os.epoch "utc")
 _log.info("Treetle starting...")
 
 if not peripheral.find("workbench") then
-  _log.error("A crafting table peripheral is required.")
+  _log.fatal("A crafting table peripheral is required.")
   return
 end
 
 if not turtle.craft then
-  _log.error("Please restart the turtle before running this program, the crafting table was not registered properly.")
+  _log.fatal("Please restart the turtle before running this program, the crafting table was not registered properly.")
   return
 end
 
@@ -1188,7 +1194,7 @@ else
   pcall(update_state, STATES.IDLE)
 end
 
-_log.error(err)
+_log.fatal(err)
 term.clear()
 term.setCursorPos(1, 1)
 error(err, 0)
