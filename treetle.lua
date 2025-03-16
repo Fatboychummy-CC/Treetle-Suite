@@ -875,10 +875,6 @@ local function wait_for_tree()
 end
 
 
---- Used for inter-thread communication between the communication thread and the main thread.
---- Determines if the turtle can run.
----@type boolean
-local can_run = false
 
 --- Main loop
 local function main()
@@ -920,31 +916,33 @@ local function main()
     move_to(0, 0, 0, FACINGS.NORTH)
   end
 
-  -- Assuming we are back at the start position now, we should start with an optimal inventory.
-  condense_inventory()
-
-  while true do
-    plant_sapling()
-
+  local function discover_self()
     _log.info("Halting until run signal.")
+    os.queueEvent("discover_now")
     parallel.waitForAny(function()
-      while not can_run do
-        os.pullEvent("treetle_run")
-      end
+      os.pullEvent("treetle_run")
     end, function()
       sleep(60) -- Timeout thread
       _log.warn("Timeout reached. Is Controltle alive?")
     end)
+  end
 
+  -- Assuming we are back at the start position now, we should start with an optimal inventory.
+  condense_inventory()
+  update_state(STATES.IDLE)
+  discover_self()
+
+  while true do
+    plant_sapling()
     wait_for_tree()
 
     if turtle.getFuelLevel() < REFUEL_TO then
       refuel()
     end
 
-    can_run = false
     dig_tree()
     condense_inventory()
+    discover_self()
   end
 end
 
@@ -1077,7 +1075,7 @@ local function communication_handler()
     modem = peripheral.hasType("bottom", "peripheral_hub") and peripheral.wrap("bottom") --[[@as WiredModem?]]
     if modem then modem.open(TREETLE_CHANNEL) end
     comms_log.debug(modem and "Modem connected." or "Modem disconnected.")
-    return modem and true or false
+    return modem ~= nil
   end
 
 
@@ -1106,52 +1104,60 @@ local function communication_handler()
   end
 
 
-
-  local function wait_for_modem()
-    while not connected do
-      local ev, periph = os.pullEvent("peripheral")
-      if ev == "peripheral" and periph == "bottom" then
-        connected = wrap_modem()
+  --- Attempt to get the turtle's name.
+  ---@return string? name The turtle's name.
+  local function wait_for_name()
+    local name
+    parallel.waitForAny(
+      function()
+        while not name do
+          name = peripheral.call("bottom", "getNameLocal")
+          sleep(0.25)
+        end
+      end,
+      function()
+        sleep(2)
       end
+    )
+
+    return name
+  end
+
+
+
+  local function broadcast_discovery()
+    local turtle_name = wait_for_name()
+    if turtle_name then
+      modem.transmit(TREETLE_CHANNEL, TREETLE_CHANNEL, {
+        action = "treetle_discovery",
+        turtle_name = turtle_name,
+        turtle_id = os.getComputerID()
+      })
+      comms_log.debug("Broadcasted discovery.")
+    else
+      comms_log.warn("Failed to get turtle network name.")
     end
   end
 
 
+
   while true do
-    if not wrap_modem() then
-      wait_for_modem()
-    else
-      connected = true
-    end
+    local event = table.pack(pull_events("modem_message", "discover_now"))
 
-    while connected do
-      local event = table.pack(pull_events("modem_message", "peripheral_detach", "peripheral"))
+    if event[1] == "discover_now" then
+      connected = wrap_modem()
+      if connected then
+        broadcast_discovery()
+      end
+    elseif event[1] == "modem_message" then
+      local modem_side, channel, reply_channel, message = table.unpack(event, 2)
+      comms_log.debug("Received message:", modem_side, channel, reply_channel, textutils.serialize(message, {compact=true}))
 
-      if event[1] == "peripheral" or event[1] == "peripheral_detach" and event[2] == "bottom" then
-        connected = wrap_modem()
-        if connected then
-          local turtle_name = peripheral.call("bottom", "getNameLocal")
-          if turtle_name then
-            modem.transmit(TREETLE_CHANNEL, TREETLE_CHANNEL, {
-              action = "treetle_discovery",
-              turtle_name = turtle_name,
-              turtle_id = os.getComputerID()
-            })
-          else
-            comms_log.warn("Failed to get turtle ID.")
-          end
-        end
-      elseif event[1] == "modem_message" then
-        local modem_side, channel, reply_channel, message = table.unpack(event, 2)
-        comms_log.debug("Received message:", modem_side, channel, reply_channel, textutils.serialize(message, {compact=true}))
-
-        if modem_side == "bottom" and channel == TREETLE_CHANNEL then
-          if type(message) == "table" then
-            if message.action == "treetle_go" and message.turtle_id == os.getComputerID() then
-              comms_log.debug("Received run signal.")
-              can_run = true
-              os.queueEvent("treetle_run")
-            end
+      if modem_side == "bottom" and channel == TREETLE_CHANNEL then
+        if type(message) == "table" then
+          if message.action == "treetle_go" and message.turtle_id == os.getComputerID() then
+            comms_log.debug("Received run signal.")
+            os.queueEvent("treetle_run")
           end
         end
       end
