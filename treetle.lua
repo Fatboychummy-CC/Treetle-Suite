@@ -784,6 +784,19 @@ local function dig_tree(_r)
     down()
   end
 
+  -- Check below the turtle for logs or leaves
+  local is_log, is_leaves = is_log_or_leaf(turtle.inspectDown)
+  if is_leaves then
+    _log.debug("Leaves down")
+    turtle.digDown()
+  elseif is_log then
+    -- Recurse into the block.
+    _log.debug("Log down")
+    down()
+    dig_tree(true)
+    up()
+  end
+
   -- Return to the "home" position
   if not _r then
     -- Step back out of the tree.
