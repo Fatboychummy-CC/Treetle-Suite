@@ -168,7 +168,9 @@ end
 --#region logs
 
 local ui_log = minilogger.new("ui")
-local main_log = minilogger.new("main")
+local t_log = minilogger.new("treetle_handler")
+local r_log = minilogger.new("reclamation")
+local s_log = minilogger.new("smelt")
 
 --#endregion logs
 
@@ -399,7 +401,7 @@ local function send_items(inv_name, turtle_name, item_types, n)
   for name in pairs(item_types) do
     table.insert(names, name)
   end
-  main_log.debug("Sent", sent, "of", n, "items (", table.concat(names, ", "), ") to", turtle_name, "from", inv_name)
+  t_log.debug("Sent", sent, "of", n, "items (", table.concat(names, ", "), ") to", turtle_name, "from", inv_name)
 
   return sent
 end
@@ -467,8 +469,16 @@ end
 --- Sends all items in the given inventory to storage.
 ---@param inv_name string The name of the inventory to send items from.
 ---@return boolean success False if any item failed to move.
+---@return integer sent The number of items sent.
 local function send_all_to_storage(inv_name)
   expect(1, inv_name, "string")
+
+  local sent = 0
+  local initial_total = 0
+  local initial_items = smn.call(inv_name, "list")
+  for _, item in pairs(initial_items) do
+    initial_total = initial_total + item.count
+  end
 
   --- Attempt to move all items in the inventory into the given storage, once.
   ---@param storage string The name of the storage to move items to.
@@ -479,7 +489,7 @@ local function send_all_to_storage(inv_name)
 
     for slot, item in pairs(items) do
       table.insert(funcs, function()
-        smn.call(inv_name, "pushItems", storage, slot, item.count)
+        sent = sent + smn.call(inv_name, "pushItems", storage, slot, item.count)
       end)
     end
 
@@ -490,11 +500,11 @@ local function send_all_to_storage(inv_name)
 
   for _, storage in ipairs(config.storages) do
     if attempt_once(storage) then
-      return true
+      return true, sent
     end
   end
 
-  return false
+  return sent >= initial_total, sent
 end
 
 
@@ -508,7 +518,7 @@ local intermediate_locked = false
 local function take_back_items(turtle_name)
   expect(1, turtle_name, "string")
 
-  main_log.debug("Handling", turtle_name)
+  t_log.debug("Handling", turtle_name)
 
   if not config.intermediate_chest or not smn.isPresent(config.intermediate_chest) then
     return 0
@@ -534,7 +544,7 @@ local function take_back_items(turtle_name)
   -- b. Saplings
   local sent_saplings = send_items(config.intermediate_chest, turtle_name, SAPLING_IDS, 16)
 
-  main_log.debug("Sent", sent_fuel, "fuel and", sent_saplings, "saplings back to", turtle_name)
+  t_log.debug("Sent", sent_fuel, "fuel and", sent_saplings, "saplings back to", turtle_name)
 
   -- And send everything else to the storages.
   send_all_to_storage(config.intermediate_chest)
@@ -545,22 +555,22 @@ local function take_back_items(turtle_name)
   -- 2. If less than 32 saplings and we didn't send anything back, send a single sapling.
   -- 3. Otherwise, send 16 of each.
   local _, _, saplings, fuels = count_important()
-  main_log.debug("Storage Fuel:", fuels, "\nStorage Saplings:", saplings)
+  t_log.debug("Storage Fuel:", fuels, "\nStorage Saplings:", saplings)
 
   if fuels - (16 - sent_fuel) >= 4 then
-    main_log.debug("Sending", 16 - sent_fuel, "fuel from storage to", turtle_name)
+    t_log.debug("Sending", 16 - sent_fuel, "fuel from storage to", turtle_name)
     send_items_from_storage(turtle_name, FUEL_IDS, 16 - sent_fuel)
   end
 
   if saplings < 32 and sent_saplings == 0 then
-    main_log.debug("Sending", 1, "sapling from storage to", turtle_name)
+    t_log.debug("Sending", 1, "sapling from storage to", turtle_name)
     send_items_from_storage(turtle_name, SAPLING_IDS, 1)
   else
-    main_log.debug("Sending", 16 - sent_saplings, "saplings from storage to", turtle_name)
+    t_log.debug("Sending", 16 - sent_saplings, "saplings from storage to", turtle_name)
     send_items_from_storage(turtle_name, SAPLING_IDS, 16 - sent_saplings)
   end
 
-  main_log.debug("Done handling", turtle_name)
+  t_log.debug("Done handling", turtle_name)
 
   intermediate_locked = false
 end
@@ -572,14 +582,29 @@ end
 local function notify_turtle(turtle_id)
   expect(1, turtle_id, "number")
 
-  sleep(2) -- Ensure the turtle has had time to do whatever it needs to do.
-
   smn.transmit(TREETLE_CHANNEL, TREETLE_CHANNEL, {
     action = "treetle_go",
     turtle_id = turtle_id
   })
 
-  main_log.debug("Notified turtle", turtle_id, "that it can continue.")
+  t_log.debug("Notified turtle", turtle_id, "that it can continue.")
+end
+
+
+
+--- Reclaims items from the reclamation chest.
+local function reclaim()
+  if not config.reclamation_chest or not smn.isPresent(config.reclamation_chest) then
+    r_log.debug("No reclamation chest present.")
+    return
+  end
+
+  r_log.debug("Reclaiming items from reclamation chest.")
+  local full, sent = send_all_to_storage(config.reclamation_chest)
+  if full then
+    r_log.warn("Storages are full, something failed to send.")
+  end
+  r_log.debugf("Reclaimed %d item%s from reclamation chest.", sent, sent == 1 and "" or "s")
 end
 
 
@@ -779,20 +804,20 @@ end
 
 
 
---- Run the main system.
-_log.debug("Main thread is", thread.new(function()
-  main_log.info("Starting Controltle.")
+--- Run the treetle handler.
+_log.debug("Treetle Handler thread is", thread.new(function()
+  t_log.info("Starting Controltle.")
   load_config()
-  main_log.debug("Entering main loop.")
+  t_log.debug("Entering main loop.")
   while true do
     local _, _, _, _, message = os.pullEvent("modem_message")
-    main_log.debug("Received message: ", textutils.serialize(message, {compact=true}))
+    t_log.debug("Received message: ", textutils.serialize(message, {compact=true}))
 
     if type(message) == "table" and message.action == "treetle_discovery" then
-      main_log.debugf("Received treetle discovery from %s, with ID %d.", message.turtle_name, message.turtle_id)
+      t_log.debugf("Received treetle discovery from %s, with ID %d.", message.turtle_name, message.turtle_id)
       thread.new(take_back_items, message.turtle_name)
         :after(notify_turtle, message.turtle_id)
-        :on_error(main_log.error, "\n\nThe above error occurred when dealing with treetle", message.turtle_id, "as", message.turtle_name)
+        :on_error(t_log.error, "\n\nThe above error occurred when dealing with treetle", message.turtle_id, "as", message.turtle_name)
     end
   end
 end).id)
@@ -806,14 +831,25 @@ _log.debug("UI thread is", thread.new(function()
   term.clear()
   sleep(0.25)
   if not next(config.furnaces) or not next(config.storages) or not config.intermediate_chest then
-    main_log.info("Displaying help.")
+    t_log.info("Displaying help.")
     display_help()
   end
 
-  main_log.debug("Fade in.")
+  t_log.debug("Fade in.")
   fade_in()
 
   -- ...
+end).id)
+
+
+
+--- Reclamation Thread
+--- Schedules a reclamation every 30 seconds.
+_log.debug("Reclamation thread is", thread.new(function()
+  while true do
+    reclaim()
+    sleep(30)
+  end
 end).id)
 
 
