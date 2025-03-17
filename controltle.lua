@@ -14,12 +14,14 @@ local palette = catppuccin.set_palette("mocha")
 local smn = require "single_modem_network"
 local thread = require "thread"
 local locks = require "locks"
+local mega_inventory = require "mega_inventory"
 minilogger.set_log_level(... and minilogger.LOG_LEVELS[(...):upper()] or minilogger.LOG_LEVELS.INFO)
 term.setBackgroundColor(palette.crust)
 term.setTextColor(palette.text)
 term.clear()
 
 --#region Setup
+local storages = mega_inventory.new()
 do
   local modem_found
   for _, side in ipairs(redstone.getSides()) do
@@ -153,7 +155,17 @@ local config = {
 
 --- Loads the configuration from the config file.
 local function load_config()
-  config = CONFIG_FILE:unserialize(config)
+  config = CONFIG_FILE:unserialize(config) --[[@as controltle_config]]
+
+  storages = mega_inventory.new()
+  for _, storage in ipairs(config.storages) do
+    local inv = smn.wrap(storage) --[[@as Inventory?]]
+    if inv then
+      storages:add_inventory(inv)
+    else
+      _log.warn("Storage", storage, "is not present.")
+    end
+  end
 end
 
 
@@ -433,15 +445,8 @@ local function send_items_from_storage(turtle_name, item_types, n)
 
   storage_lock:await_lock()
 
-  local sent = 0
-
-  for _, storage in ipairs(config.storages) do
-    sent = sent + send_items(storage, turtle_name, item_types, n - sent)
-
-    if sent >= n then
-      break
-    end
-  end
+  storages:list()
+  local sent = storages:batch_push_items(turtle_name, item_types, n)
 
   storage_lock:unlock()
 
@@ -458,27 +463,19 @@ end
 ---@return integer saplings The number of saplings in the storage chests.
 ---@return integer fuels The number of 'good' fuels in the storage chests.
 local function count_important()
-  local funcs = {}
-
   local logs, planks, saplings, fuels = 0, 0, 0, 0
-  for _, inventory_name in ipairs(config.storages) do
-    table.insert(funcs, function()
-      local items = smn.call(inventory_name, "list")
-      for _, item in pairs(items) do
-        if LOG_IDS[item.name] then
-          logs = logs + item.count
-        elseif PLANK_IDS[item.name] then
-          planks = planks + item.count
-        elseif SAPLING_IDS[item.name] then
-          saplings = saplings + item.count
-        elseif FUEL_IDS[item.name] then
-          fuels = fuels + item.count
-        end
-      end
-    end)
+  local items = storages:list()
+  for _, item in pairs(items) do
+    if LOG_IDS[item.name] then
+      logs = logs + item.count
+    elseif PLANK_IDS[item.name] then
+      planks = planks + item.count
+    elseif SAPLING_IDS[item.name] then
+      saplings = saplings + item.count
+    elseif FUEL_IDS[item.name] then
+      fuels = fuels + item.count
+    end
   end
-
-  parallel.waitForAll(table.unpack(funcs)) -- Hopefully people don't use more than 256 storages.
 
   return logs, planks, saplings, fuels
 end
@@ -489,47 +486,16 @@ end
 --- 
 --- Requires lock.
 ---@param inv_name string The name of the inventory to send items from.
----@return boolean success False if any item failed to move.
 ---@return integer sent The number of items sent.
 local function send_all_to_storage(inv_name)
   expect(1, inv_name, "string")
 
   storage_lock:await_lock()
 
-  local sent = 0
-  local initial_total = 0
-  local initial_items = smn.call(inv_name, "list")
-  for _, item in pairs(initial_items) do
-    initial_total = initial_total + item.count
-  end
-
-  --- Attempt to move all items in the inventory into the given storage, once.
-  ---@param storage string The name of the storage to move items to.
-  ---@return boolean success False if any item failed to move.
-  local function attempt_once(storage)
-    local funcs = {}
-    local items = smn.call(inv_name, "list")
-
-    for slot, item in pairs(items) do
-      table.insert(funcs, function()
-        sent = sent + smn.call(inv_name, "pushItems", storage, slot, item.count)
-      end)
-    end
-
-    parallel.waitForAll(table.unpack(funcs))
-
-    return next(smn.call(inv_name, "list")) == nil
-  end
-
-  for _, storage in ipairs(config.storages) do
-    if attempt_once(storage) then
-      storage_lock:unlock()
-      return true, sent
-    end
-  end
+  local sent = storages:pull_all_items(inv_name)
 
   storage_lock:unlock()
-  return sent >= initial_total, sent
+  return sent
 end
 
 
@@ -570,7 +536,6 @@ local function take_back_items(turtle_name)
 
   -- We're done with the intermediate chest, but we still need the storages.
   intermediate_lock:unlock()
-  storage_lock:await_lock()
 
   -- If we sent less than 16 fuel or saplings, check if there are more in the storages, and send them.
   -- However:
@@ -586,7 +551,7 @@ local function take_back_items(turtle_name)
   end
 
   if saplings < 32 and sent_saplings == 0 then
-    t_log.debug("Sending", 1, "sapling from storage to", turtle_name)
+    t_log.debug("Sending 1 sapling from storage to", turtle_name)
     send_items_from_storage(turtle_name, SAPLING_IDS, 1)
   else
     t_log.debug("Sending", 16 - sent_saplings, "saplings from storage to", turtle_name)
@@ -594,8 +559,6 @@ local function take_back_items(turtle_name)
   end
 
   t_log.debug("Done handling", turtle_name)
-
-  storage_lock:unlock()
 end
 
 
@@ -623,10 +586,7 @@ local function reclaim()
   end
 
   r_log.debug("Reclaiming items from reclamation chest.")
-  local full, sent = send_all_to_storage(config.reclamation_chest)
-  if full then
-    r_log.warn("Storages are full, something failed to send.")
-  end
+  local sent = send_all_to_storage(config.reclamation_chest)
   r_log.debugf("Reclaimed %d item%s from reclamation chest.", sent, sent == 1 and "" or "s")
 end
 
