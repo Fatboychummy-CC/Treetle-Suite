@@ -13,6 +13,7 @@ local catppuccin = require "catppuccin"
 local palette = catppuccin.set_palette("mocha")
 local smn = require "single_modem_network"
 local thread = require "thread"
+local locks = require "locks"
 minilogger.set_log_level(... and minilogger.LOG_LEVELS[(...):upper()] or minilogger.LOG_LEVELS.INFO)
 term.setBackgroundColor(palette.crust)
 term.setTextColor(palette.text)
@@ -173,6 +174,16 @@ local r_log = minilogger.new("reclamation")
 local s_log = minilogger.new("smelt")
 
 --#endregion logs
+
+--#region locks
+
+--- Lock for the main storages.
+local storage_lock = locks.new()
+
+--- Lock for the intermediate chest.
+local intermediate_lock = locks.new()
+
+--#endregion locks
 
 --#region Helper Functions
 
@@ -409,6 +420,8 @@ end
 
 
 --- Sends `n` items of the given type to the given turtle, from storage.
+--- 
+--- Requires lock.
 ---@param turtle_name string The name of the turtle to send items to.
 ---@param item_types id_lookup The type of item to send.
 ---@param n integer The number of items to send.
@@ -417,6 +430,8 @@ local function send_items_from_storage(turtle_name, item_types, n)
   expect(1, turtle_name, "string")
   expect(2, item_types, "table")
   expect(3, n, "number")
+
+  storage_lock:await_lock()
 
   local sent = 0
 
@@ -428,12 +443,16 @@ local function send_items_from_storage(turtle_name, item_types, n)
     end
   end
 
+  storage_lock:unlock()
+
   return sent
 end
 
 
 
 --- Count 'important' items in the storage chests.
+--- 
+--- Does not require lock, as it does not alter the state.
 ---@return integer logs The number of logs in the storage chests.
 ---@return integer planks The number of planks in the storage chests.
 ---@return integer saplings The number of saplings in the storage chests.
@@ -467,11 +486,15 @@ end
 
 
 --- Sends all items in the given inventory to storage.
+--- 
+--- Requires lock.
 ---@param inv_name string The name of the inventory to send items from.
 ---@return boolean success False if any item failed to move.
 ---@return integer sent The number of items sent.
 local function send_all_to_storage(inv_name)
   expect(1, inv_name, "string")
+
+  storage_lock:await_lock()
 
   local sent = 0
   local initial_total = 0
@@ -500,20 +523,23 @@ local function send_all_to_storage(inv_name)
 
   for _, storage in ipairs(config.storages) do
     if attempt_once(storage) then
+      storage_lock:unlock()
       return true, sent
     end
   end
 
+  storage_lock:unlock()
   return sent >= initial_total, sent
 end
 
 
 
-local intermediate_locked = false
 --- Takes items from the given turtle
 --- Leaves the following in the inventories:
 --- 1. Fuel, x16
 --- 2. Saplings, x16
+--- 
+--- Requires lock on intermediate chest, then storages.
 ---@param turtle_name string The name of the turtle to take items from.
 local function take_back_items(turtle_name)
   expect(1, turtle_name, "string")
@@ -524,19 +550,12 @@ local function take_back_items(turtle_name)
     return 0
   end
 
-  while intermediate_locked do
-    sleep()
-  end
-
-  intermediate_locked = true
+  intermediate_lock:await_lock()
 
   -- Take everything from the turtle, moving it into the intermediate chest.
   for slot = 1, 16 do
     smn.call(config.intermediate_chest, "pullItems", turtle_name, slot)
   end
-
-  -- Determine what is now in the intermediate chest.
-  local items = smn.call(config.intermediate_chest, "list")
 
   -- Send 16 fuel and 16 saplings back to the turtle (if they exist).
   -- a. Fuel
@@ -548,6 +567,10 @@ local function take_back_items(turtle_name)
 
   -- And send everything else to the storages.
   send_all_to_storage(config.intermediate_chest)
+
+  -- We're done with the intermediate chest, but we still need the storages.
+  intermediate_lock:unlock()
+  storage_lock:await_lock()
 
   -- If we sent less than 16 fuel or saplings, check if there are more in the storages, and send them.
   -- However:
@@ -572,7 +595,7 @@ local function take_back_items(turtle_name)
 
   t_log.debug("Done handling", turtle_name)
 
-  intermediate_locked = false
+  storage_lock:unlock()
 end
 
 
