@@ -49,6 +49,11 @@ end
 local TREETLE_CHANNEL = 35000
 smn.open(TREETLE_CHANNEL)
 
+local SELF_NETWORK_ID = smn.getNameLocal()
+if not SELF_NETWORK_ID then
+  error("Turn on the modem, idot.")
+end
+
 --- The item IDs of saplings that the turtle will plant.
 ---@type id_lookup
 local SAPLING_IDS = {
@@ -97,12 +102,18 @@ local PLANK_IDS = {
 }
 
 --- The item IDs of "good" fuels that will be sent to turtles for refueling.
+--- 
+--- **Notice:**
+---   Coal blocks and buckets of lava are *intentionally left out*.
+---   These blocks can smelt more than 64 items, so would need extra handling
+---   to move the extra blocks in when they are able to fit in the slot.
+---   I plan to eventually support these, but for now the system entirely
+---   ignores them.
+--- 
 ---@type id_lookup
 local FUEL_IDS = {
-  ["minecraft:coal_block"] = true,
   ["minecraft:charcoal"] = true,
   ["minecraft:coal"] = true,
-  ["minecraft:lava_bucket"] = true,
   ["minecraft:dried_kelp_block"] = true,
   ["minecraft:blaze_rod"] = true
 }
@@ -114,13 +125,12 @@ local FUEL_IDS = {
 local SMELT_FUEL_IDS = {
   ["minecraft:coal"] = 1600,
   ["minecraft:charcoal"] = 1600,
-  ["minecraft:lava_bucket"] = 20000,
-  ["minecraft:coal_block"] = 16000,
   ["minecraft:dried_kelp_block"] = 4000,
   ["minecraft:blaze_rod"] = 2400,
 }
 for name in pairs(PLANK_IDS) do
   SMELT_FUEL_IDS[name] = 300
+  FUEL_IDS[name] = true
 end
 
 --- The amount of time it takes to smelt a single item, in ticks.
@@ -183,7 +193,8 @@ end
 local ui_log = minilogger.new("ui")
 local t_log = minilogger.new("treetle_handler")
 local r_log = minilogger.new("reclamation")
-local s_log = minilogger.new("smelt")
+local s_log = minilogger.new("smelting")
+local c_log = minilogger.new("crafting")
 
 --#endregion logs
 
@@ -431,26 +442,70 @@ end
 
 
 
---- Sends `n` items of the given type to the given turtle, from storage.
+--- Sends `n` items of the given types to the given inventory, from storage.
 --- 
 --- Requires lock.
----@param turtle_name string The name of the turtle to send items to.
+---@param inv_name string The name of the inventory to send items to.
 ---@param item_types id_lookup The type of item to send.
 ---@param n integer The number of items to send.
 ---@return integer sent The number of items actually sent.
-local function send_items_from_storage(turtle_name, item_types, n)
-  expect(1, turtle_name, "string")
+local function send_items_from_storage(inv_name, item_types, n)
+  expect(1, inv_name, "string")
   expect(2, item_types, "table")
   expect(3, n, "number")
 
   storage_lock:await_lock()
 
   storages:list()
-  local sent = storages:batch_push_items(turtle_name, item_types, n)
+  local sent = storages:batch_push_items(inv_name, item_types, n)
 
   storage_lock:unlock()
 
   return sent
+end
+
+
+
+--- Sends `n` items of the given type to the given inventory, from storage.
+--- 
+--- Requires lock.
+---@param inventory_name string The name of the inventory to send items to.
+---@param item_type string The type of item to send.
+---@param n integer The number of items to send.
+---@param result_slot integer? The slot to put the result in.
+---@return integer sent The number of items actually sent.
+local function send_item_from_storage(inventory_name, item_type, n, result_slot)
+  expect(1, inventory_name, "string")
+  expect(2, item_type, "string")
+  expect(3, n, "number")
+  expect(4, result_slot, "number", "nil")
+
+  storage_lock:await_lock()
+
+  local sent = storages:push_items(inventory_name, item_type, n, result_slot)
+
+  storage_lock:unlock()
+
+  return sent
+end
+
+
+
+--- Count how many of each item of a given item type there is in the storages.
+---@param item_types id_lookup The type of item to count.
+---@return table<string, integer> counts The counts of each item type.
+local function count_items(item_types)
+  expect(1, item_types, "table")
+
+  local counts = {}
+  local items = storages:list()
+  for _, item in pairs(items) do
+    if item_types[item.name] then
+      counts[item.name] = (counts[item.name] or 0) + item.count
+    end
+  end
+
+  return counts
 end
 
 
@@ -468,11 +523,14 @@ local function count_important()
   for _, item in pairs(items) do
     if LOG_IDS[item.name] then
       logs = logs + item.count
-    elseif PLANK_IDS[item.name] then
+    end
+    if PLANK_IDS[item.name] then
       planks = planks + item.count
-    elseif SAPLING_IDS[item.name] then
+    end
+    if SAPLING_IDS[item.name] then
       saplings = saplings + item.count
-    elseif FUEL_IDS[item.name] then
+    end
+    if FUEL_IDS[item.name] then
       fuels = fuels + item.count
     end
   end
@@ -563,6 +621,30 @@ end
 
 
 
+--- Takes items from the current turtle
+--- Leaves nothing in the inventory.
+--- 
+--- Requires lock on intermediate chest, then storages.
+local function take_back_items_self()
+  if not config.intermediate_chest or not smn.isPresent(config.intermediate_chest) then
+    return 0
+  end
+
+  intermediate_lock:await_lock()
+
+  -- Take everything from the turtle, moving it into the intermediate chest.
+  for slot = 1, 16 do
+    smn.call(config.intermediate_chest, "pullItems", SELF_NETWORK_ID, slot)
+  end
+
+  -- Send everything to the storages.
+  send_all_to_storage(config.intermediate_chest)
+
+  intermediate_lock:unlock()
+end
+
+
+
 --- Notifies a turtle that its okay to go.
 ---@param turtle_id integer The name of the turtle to notify.
 local function notify_turtle(turtle_id)
@@ -589,6 +671,114 @@ local function reclaim()
   local sent = send_all_to_storage(config.reclamation_chest)
   r_log.debugf("Reclaimed %d item%s from reclamation chest.", sent, sent == 1 and "" or "s")
 end
+
+
+
+---@class CraftingTask
+---@field inputs table<integer, ItemIdentifier> The inputs to the crafting task, keys are slot numbers (1-9), values are item names.
+---@field id integer The ID of the crafting task.
+---@field craft_count integer? The number of times to complete the crafting task. Defaults to 1.
+
+--- Identifies an item (or set of items) in the storage system.
+--- Only one of the optional fields should be present.
+---@class ItemIdentifier
+---@field name string? The name of the item.
+---@field names id_lookup? The names of the item.
+---@field tag string? The tag of the item.
+---@field tags id_lookup? The tags of the item.
+---@field count integer The number of items required.
+
+
+---@type CraftingTask[]
+local crafting_queue = {}
+local last_crafting_id = 0
+
+--- Create a new crafting task, and add it to the crafting queue.
+--- Items crafted will be sent to the storage.
+---@param inputs table<integer, ItemIdentifier> The inputs to the crafting task, keys are slot numbers (1-9), values are item names.
+---@return integer ID The ID of the crafting task.
+---@overload fun(inputs: table<integer, string>, await: boolean): nil Awaits the crafting task, doesn't return the ID.
+local function create_crafting_task(inputs, await)
+  expect(1, inputs, "table")
+  expect(2, await, "boolean", "nil")
+
+  last_crafting_id = last_crafting_id + 1
+  local task = {
+    inputs = inputs,
+    id = last_crafting_id,
+    craft_count = 1
+  }
+
+  table.insert(crafting_queue, task)
+  os.queueEvent("crafting_task_created")
+  c_log.debug("Created crafting task", task.id)
+
+  if await then
+    repeat
+      local _, task_id = os.pullEvent("crafting_task_complete") --[[@as integer]]
+    until task_id == task_id
+  end
+end
+
+
+
+--- Crafts the given item request, and sends the result to the storage.
+---@param task CraftingTask The task to craft.
+local function run_crafting_task(task)
+  expect(1, task, "table")
+
+  --- Abort: Send everything in the turtle to storage.
+  local function end_task()
+    os.queueEvent("crafting_task_complete", task.id)
+  end
+
+  for _ = 1, task.craft_count or 1 do
+    for slot, item_identifier in pairs(task.inputs) do
+      local items = storages:list()
+      local found = false
+      local pushed = 0
+
+      for _, item in pairs(items) do
+        if item_identifier.name and item.name == item_identifier.name then
+          found = true
+          pushed = storages:push_items(SELF_NETWORK_ID, item.name, item_identifier.count, slot)
+          break
+        elseif item_identifier.tag and item.tags[item_identifier.tag] then
+          found = true
+          pushed = storages:push_items(SELF_NETWORK_ID, item.name, item_identifier.count, slot)
+          break
+        elseif item_identifier.names and item_identifier.names[item.name] then
+          found = true
+          pushed = storages:push_items(SELF_NETWORK_ID, item.name, item_identifier.count, slot)
+          break
+        elseif item_identifier.tags then
+          for tag in pairs(item_identifier.tags) do
+            if item.tags[tag] then
+              found = true
+              pushed = storages:push_items(SELF_NETWORK_ID, item.name, item_identifier.count, slot)
+              break
+            end
+          end
+        end
+      end
+
+      if not found or pushed < item_identifier.count then
+        take_back_items_self()
+        end_task()
+        c_log.warn("Aborting crafting task", task.id, "due to missing items.")
+        return
+      end
+    end
+
+    -- Craft the items.
+    turtle.craft()
+    take_back_items_self()
+  end
+
+  end_task()
+  c_log.debug("Crafting task", task.id, "completed.")
+end
+
 
 
 
@@ -827,11 +1017,239 @@ end).id)
 
 
 --- Reclamation Thread
---- Schedules a reclamation every 30 seconds.
+--- Schedules a reclamation every 2 minutes.
 _log.debug("Reclamation thread is", thread.new(function()
   while true do
     reclaim()
-    sleep(30)
+    sleep(120)
+  end
+end).id)
+
+
+
+--- Smelting Thread
+--- Schedules individual threads for each furnace when they should be finished their smelt task.
+_log.debug("Smelting thread is", thread.new(function()
+  ---@class FurnaceData
+  ---@field furnace_name string The name of the furnace.
+  ---@field timer_id integer The ID of the timer for the furnace.
+
+
+
+  --- Get the best fuel to use for smelting the given count of items, and the count of that fuel to use.
+  --- The "best" fuel is the one that will last the longest.
+  --- If a better fuel is available, but not enough items are in the inventory to use it, the function will return nil.
+  --- If no fuel is available, the function will return nil.
+  ---@param fuels table<string, integer> fuel_name -> fuel_count The fuels available.
+  ---@param count integer The number of items to smelt.
+  ---@return string? fuel_name The name of the fuel to use.
+  ---@return integer? fuel_count The number of the fuel to use.
+  ---@return integer? item_count The number of items that should actually be smelted.
+  ---@return integer? smelt_time The time it will take to smelt the items, in ticks.
+  local function get_best_fuel(fuels, count)
+    local best_fuel = nil
+    local best_fuel_time = 0
+    local best_fuel_count = 0
+
+    -- First, find the best fuel to use.
+    for fuel, fuel_count in pairs(fuels) do
+      local fuel_time = SMELT_FUEL_IDS[fuel]
+      if fuel_time > best_fuel_time then
+        best_fuel = fuel
+        best_fuel_time = fuel_time
+        best_fuel_count = fuel_count
+      end
+    end
+
+    if not best_fuel then s_log.debug("No fuel whatsoever.") return end -- no fuel whatsoever
+
+    -- Now, we have the count of the fuel and the count of the items.
+    -- Determine how many items we can actually smelt, such that we don't waste fuel.
+    local actual_smelt_count = math.min(
+      count,
+      math.floor(best_fuel_time / SMELT_TIME * best_fuel_count) -- The maximum number of items we can smelt with this fuel.
+    )
+
+    -- Ensure we aren't smelting more than 64
+    actual_smelt_count = math.min(actual_smelt_count, 64)
+
+    -- We need to lower the actual count until it is a multiple of our fuel smelt time.
+    while (actual_smelt_count * best_fuel_time) % SMELT_TIME ~= 0 and actual_smelt_count > 0 do
+      actual_smelt_count = actual_smelt_count - 1
+    end
+
+    if actual_smelt_count <= 0 then s_log.debug("Would waste fuel.") return end -- Not enough items to not waste fuel.
+
+    -- Semi-finally, determine how many fuels are needed to smelt the actual count.
+    local fuel_needed = math.ceil(actual_smelt_count * SMELT_TIME / best_fuel_time)
+
+    -- Finally, determine the time it takes to use this count of fuels.
+    local smelt_time = actual_smelt_count * SMELT_TIME
+
+    return best_fuel, fuel_needed, actual_smelt_count, smelt_time
+  end
+
+
+
+  ---@type table<integer, FurnaceData[]> Timer ID -> Furnace Names
+  local furnace_times = {}
+
+
+
+  --- Get a list of furnaces which are "open" (not currently smelting).
+  --- This is determined by checking if the furnace is NOT in the list of furnace times.
+  ---@return string[] The names of the open furnaces.
+  local function get_open_furnaces()
+    local open_furnaces = {}
+
+    for _, furnace in ipairs(config.furnaces) do
+      local found = false
+
+      for _, data in pairs(furnace_times) do
+        if data.furnace_name == furnace then
+          found = true
+          break
+        end
+      end
+
+      if not found then
+        table.insert(open_furnaces, furnace)
+      end
+    end
+
+    return open_furnaces
+  end
+
+
+
+  while true do
+    -- First, check if any furnaces are free.
+    local free_furnaces = get_open_furnaces()
+
+    -- Then, check if we have any logs to smelt (and fuels to use).
+    local total_logs, _, _, total_fuels = count_important()
+
+    if free_furnaces[1] and total_logs > 0 and total_fuels > 0 then
+      s_log.debug("Smelting logs.")
+      local fuels = count_items(FUEL_IDS)
+      local logs = count_items(LOG_IDS)
+
+      local sent = false
+      for log_name, count in pairs(logs) do
+        local fuel, fuel_count, item_count, smelt_time = get_best_fuel(fuels, count)
+
+        if fuel then
+          s_log.debug("Best fuel for", count, log_name, "is", fuel, "with", fuel_count, "fuel and", item_count, "items.")
+          ---@cast fuel_count integer
+          ---@cast item_count integer
+          ---@cast smelt_time integer
+          local furnace = free_furnaces[1]
+
+          -- We can smelt this stack of logs.
+
+          -- 1. Send the logs to the furnace.
+          local sent_logs = send_item_from_storage(
+            furnace,
+            log_name,
+            item_count,
+            1
+          )
+
+          -- 2. Send the fuel to the furnace.
+          local sent_fuel = send_item_from_storage(
+            furnace,
+            fuel,
+            fuel_count,
+            2
+          )
+
+          -- We add a single tick to ensure that the smelt operation is actually complete.
+          local timer_id = os.startTimer(smelt_time / 20 + 0.05)
+          furnace_times[timer_id] = {
+            furnace_name = free_furnaces[1],
+            timer_id = timer_id
+          }
+
+          -- 3. Register a thread that will wait until the smelting is done and move everything back.
+          thread.new(function()
+            s_log.debug("Waiting", smelt_time + 1, "ticks for furnace", furnace, "to finish smelting.")
+
+            -- Wait for the timer to go off.
+            repeat
+              local _, id = os.pullEvent("timer")
+            until id == timer_id
+
+            -- Move everything back.
+            send_all_to_storage(furnace)
+          end)
+          :after(function() furnace_times[timer_id] = nil end)
+          :on_error(function(err)
+            s_log.error("Error occurred when waiting for furnace", furnace, "to finish smelting.")
+            s_log.error(err)
+            pcall(send_all_to_storage, furnace)
+            furnace_times[timer_id] = nil
+          end)
+
+          sent = true
+        else
+          s_log.debug("No fuel available for", count, log_name)
+        end
+
+        -- We want to recount everything, so we just break out and immediately loop again.
+        if sent then break end
+      end
+
+      if not sent then
+        s_log.debug("No logs could be smelted.")
+      end
+
+      sleep()
+    elseif free_furnaces[1] and total_logs > 0 and total_fuels == 0 then
+      s_log.debug("No fuel to smelt with, crafting some...")
+      -- We need to pull some logs to the turtle, convert them into planks,
+      -- then use those as fuel for now.
+
+      -- Make the crafting task.
+
+      create_crafting_task({
+        [1] = {names = LOG_IDS, count = 3}
+      }, true)
+
+      -- Give the system about 5 seconds to process the crafting task.
+      sleep(5)
+    elseif free_furnaces[1] and total_logs == 0 and total_fuels > 0 then
+      s_log.debug("No logs to smelt. Waiting for logs.")
+      sleep(10)
+    else
+      -- No free furnaces.
+      s_log.debug("No free furnaces.")
+      sleep(10)
+    end
+  end
+end).id)
+
+
+
+--- Peripheral registration/deregistration thread.
+--- This thread handles registering and de-registering peripherals from the UI and furnace threads.
+_log.debug("Peripheral thread is", thread.new(function()
+  while true do
+    sleep(60) -- temporary. will fill in later.
+  end
+end).id)
+
+
+
+--- Crafting thread. Loops through crafting tasks in the queue.
+_log.debug("Crafting thread is", thread.new(function()
+  while true do
+    while not crafting_queue[1] do
+      os.pullEvent("crafting_task_created")
+    end
+
+    local task = table.remove(crafting_queue, 1) --[[@as CraftingTask]]
+    c_log.info("Running crafting task", task.id)
+    run_crafting_task(task)
   end
 end).id)
 
@@ -841,7 +1259,7 @@ end).id)
 
 --#region Main Program
 
-local ok, err = pcall(thread.run)
+local ok, err = xpcall(thread.run, debug.traceback)
 
 pcall(catppuccin.reset_palette)
 term.setBackgroundColor(colors.black)
