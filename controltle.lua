@@ -6,6 +6,7 @@
 
 local expect = require "cc.expect".expect
 
+local new_parallelism_handler = require "parallelism_handler"
 local dir = require "filesystem":programPath()
 local minilogger = require "minilogger"
 local _log = minilogger.new("Controltle")
@@ -135,6 +136,20 @@ end
 
 --- The amount of time it takes to smelt a single item, in ticks.
 local SMELT_TIME = 200
+
+---@alias fuel_ratio_lookup table<string, {[1]:integer, [2]:integer}>
+
+--- Item IDs of fuels -> {fuel cost, items smelted}
+---@type fuel_ratio_lookup
+local SMELT_FUEL_RATIOS = {
+  ["minecraft:coal"] = {1, 8},
+  ["minecraft:charcoal"] = {1, 8},
+  ["minecraft:dried_kelp_block"] = {1, 20},
+  ["minecraft:blaze_rod"] = {1, 12},
+}
+for name in pairs(PLANK_IDS) do
+  SMELT_FUEL_RATIOS[name] = {2, 3}
+end
 
 --- The size of the screen.
 local T_W, T_H = term.getSize()
@@ -1026,73 +1041,56 @@ _log.debug("Reclamation thread is", thread.new(function()
 end).id)
 
 
+---@type table<string, true> The furnaces that are currently smelting.
+local furnaces_used = {}
 
 --- Smelting Thread
 --- Schedules individual threads for each furnace when they should be finished their smelt task.
 _log.debug("Smelting thread is", thread.new(function()
-  ---@class FurnaceData
-  ---@field furnace_name string The name of the furnace.
-  ---@field timer_id integer The ID of the timer for the furnace.
-
-
-
-  --- Get the best fuel to use for smelting the given count of items, and the count of that fuel to use.
-  --- The "best" fuel is the one that will last the longest.
-  --- If a better fuel is available, but not enough items are in the inventory to use it, the function will return nil.
-  --- If no fuel is available, the function will return nil.
+  --- Determine the best fuel to use for a given number of items to smelt.
+  --- Returns the best fuel, as well as the batch plan to use for it.
   ---@param fuels table<string, integer> fuel_name -> fuel_count The fuels available.
   ---@param count integer The number of items to smelt.
-  ---@return string? fuel_name The name of the fuel to use.
-  ---@return integer? fuel_count The number of the fuel to use.
-  ---@return integer? item_count The number of items that should actually be smelted.
-  ---@return integer? smelt_time The time it will take to smelt the items, in ticks.
+  ---@return string? id The ID of the best fuel to use, nil if no fuel is available.
+  ---@return integer fuel_count_per_batch The fuel count per batch.
+  ---@return integer item_count_per_batch The item count per batch.
+  ---@return integer batches The number of batches to smelt.
   local function get_best_fuel(fuels, count)
     local best_fuel = nil
-    local best_fuel_time = 0
-    local best_fuel_count = 0
+    local best_ratio = {0, 0}
+    local best_item_count = 0
 
-    -- First, find the best fuel to use.
-    for fuel, fuel_count in pairs(fuels) do
-      local fuel_time = SMELT_FUEL_IDS[fuel]
-      if fuel_time > best_fuel_time then
-        best_fuel = fuel
-        best_fuel_time = fuel_time
-        best_fuel_count = fuel_count
+    for fuel_name, fuel_count in pairs(fuels) do
+      local item_count = 0
+      -- [1]: fuel used
+      -- [2]: items smelted given the fuel
+      local ratio = SMELT_FUEL_RATIOS[fuel_name]
+      if ratio then
+        item_count = math.floor(fuel_count / ratio[1]) * ratio[2]
+      end
+      if item_count > best_item_count then
+        best_fuel = fuel_name
+        best_item_count = item_count
+        best_ratio = ratio
       end
     end
 
-    if not best_fuel then s_log.debug("No fuel whatsoever.") return end -- no fuel whatsoever
-
-    -- Now, we have the count of the fuel and the count of the items.
-    -- Determine how many items we can actually smelt, such that we don't waste fuel.
-    local actual_smelt_count = math.min(
-      count,
-      math.floor(best_fuel_time / SMELT_TIME * best_fuel_count) -- The maximum number of items we can smelt with this fuel.
-    )
-
-    -- Ensure we aren't smelting more than 64
-    actual_smelt_count = math.min(actual_smelt_count, 64)
-
-    -- We need to lower the actual count until it is a multiple of our fuel smelt time.
-    while (actual_smelt_count * best_fuel_time) % SMELT_TIME ~= 0 and actual_smelt_count > 0 do
-      actual_smelt_count = actual_smelt_count - 1
+    if best_item_count == 0 then
+      -- No fuel.
+      return nil, 0, 0, 0
     end
 
-    if actual_smelt_count <= 0 then s_log.debug("Would waste fuel.") return end -- Not enough items to not waste fuel.
+    local fuel_count_per_batch = best_ratio[1]
+    local item_count_per_batch = best_ratio[2]
+    local batches = math.floor(count / item_count_per_batch)
 
-    -- Semi-finally, determine how many fuels are needed to smelt the actual count.
-    local fuel_needed = math.ceil(actual_smelt_count * SMELT_TIME / best_fuel_time)
+    if batches == 0 then
+      -- Never waste fuel.
+      return nil, 0, 0, 0
+    end
 
-    -- Finally, determine the time it takes to use this count of fuels.
-    local smelt_time = actual_smelt_count * SMELT_TIME
-
-    return best_fuel, fuel_needed, actual_smelt_count, smelt_time
+    return best_fuel, fuel_count_per_batch, item_count_per_batch, batches
   end
-
-
-
-  ---@type table<integer, FurnaceData[]> Timer ID -> Furnace Names
-  local furnace_times = {}
 
 
 
@@ -1103,21 +1101,34 @@ _log.debug("Smelting thread is", thread.new(function()
     local open_furnaces = {}
 
     for _, furnace in ipairs(config.furnaces) do
-      local found = false
-
-      for _, data in pairs(furnace_times) do
-        if data.furnace_name == furnace then
-          found = true
-          break
-        end
-      end
-
-      if not found then
+      if not furnaces_used[furnace] then
         table.insert(open_furnaces, furnace)
       end
     end
 
     return open_furnaces
+  end
+
+
+
+  --- Determine the distribution of batches across the furnaces.
+  ---@param n_batches integer The number of batches to distribute.
+  ---@param n_furnaces integer The number of furnaces to distribute to.
+  ---@return integer[] distribution The distribution of batches across the furnaces.
+  local function batch_distribution(n_batches, n_furnaces)
+    local distribution = {}
+    local base = math.floor(n_batches / n_furnaces)
+    local extra = n_batches % n_furnaces
+
+    for i = 1, n_furnaces do
+      if i <= extra then
+        distribution[i] = base + 1
+      else
+        distribution[i] = base
+      end
+    end
+
+    return distribution
   end
 
 
@@ -1136,66 +1147,59 @@ _log.debug("Smelting thread is", thread.new(function()
 
       local sent = false
       for log_name, count in pairs(logs) do
-        local fuel, fuel_count, item_count, smelt_time = get_best_fuel(fuels, count)
+        -- Get the best fuel to use for this log.
+        local best_fuel, fuel_count_per_batch, item_count_per_batch, batches = get_best_fuel(fuels, count)
 
-        if fuel then
-          s_log.debug("Best fuel for", count, log_name, "is", fuel, "with", fuel_count, "fuel and", item_count, "items.")
-          ---@cast fuel_count integer
-          ---@cast item_count integer
-          ---@cast smelt_time integer
-          local furnace = free_furnaces[1]
+        if best_fuel then
+          local distribution = batch_distribution(batches, #free_furnaces)
+          s_log.debug("Distributing", batches, "batches of", log_name, "to", #free_furnaces, "furnaces.")
+          s_log.debug("Best fuel is", best_fuel, "with a ratio of", fuel_count_per_batch, "to", item_count_per_batch)
+          s_log.debug("Distribution is", table.concat(distribution, ", "))
 
-          -- We can smelt this stack of logs.
+          for i, furnace in ipairs(free_furnaces) do
+            local batch_count = distribution[i]
+            local fuel_count = batch_count * fuel_count_per_batch
+            local item_count = batch_count * item_count_per_batch
 
-          -- 1. Send the logs to the furnace.
-          local sent_logs = send_item_from_storage(
-            furnace,
-            log_name,
-            item_count,
-            1
-          )
+            if item_count > 64 then
+              -- We can't send more than 64 items at a time.
+              -- Repeatedly increase the item and fuel count until we reach 64.
+              item_count = item_count_per_batch
+              fuel_count = fuel_count_per_batch
+              while item_count < 64 do
+                item_count = item_count + item_count_per_batch
+                fuel_count = fuel_count + fuel_count_per_batch
+              end
 
-          -- 2. Send the fuel to the furnace.
-          local sent_fuel = send_item_from_storage(
-            furnace,
-            fuel,
-            fuel_count,
-            2
-          )
+              if item_count > 64 then
+                -- Oops, we went over.  
+                item_count = item_count - item_count_per_batch
+                fuel_count = fuel_count - fuel_count_per_batch
+              end
+            end
 
-          -- We add a single tick to ensure that the smelt operation is actually complete.
-          local timer_id = os.startTimer(smelt_time / 20 + 0.05)
-          furnace_times[timer_id] = {
-            furnace_name = free_furnaces[1],
-            timer_id = timer_id
-          }
+            -- Send the logs to the furnace.
+            send_item_from_storage(furnace, log_name, item_count, 1)
 
-          -- 3. Register a thread that will wait until the smelting is done and move everything back.
-          thread.new(function()
-            s_log.debug("Waiting", smelt_time + 1, "ticks for furnace", furnace, "to finish smelting.")
+            -- Send the fuel to the furnace.
+            send_item_from_storage(furnace, best_fuel, fuel_count, 2)
 
-            -- Wait for the timer to go off.
-            repeat
-              local _, id = os.pullEvent("timer")
-            until id == timer_id
-          end)
-          :after(function()
-            s_log.debug("Furnace", furnace, "finished smelting.")
-            -- Move everything back.
-            send_all_to_storage(furnace)
+            thread.new(function()
+              furnaces_used[furnace] = true
+              s_log.debug("Furnace", furnace, "will be busy for", item_count * 200 / 20, "seconds.")
 
-            furnace_times[timer_id] = nil
-          end)
-          :on_error(function(err)
-            s_log.error("Error occurred when waiting for furnace", furnace, "to finish smelting.")
-            s_log.error(err)
-            pcall(send_all_to_storage, furnace)
-            furnace_times[timer_id] = nil
-          end)
+              -- Wait for the furnace to finish smelting.
+              sleep(item_count * 200 / 20 + 0.05) -- 200 ticks per item, 20 ticks per second.
 
-          sent = true
-        else
-          s_log.debug("No fuel available for", count, log_name)
+              -- Send the items back to storage.
+              send_all_to_storage(furnace)
+              -- Remove the furnace from the list of furnace times.
+              furnaces_used[furnace] = nil
+              s_log.debug("Furnace", furnace, "is now free.")
+            end):on_error(s_log.error, "\n\nThe above error occurred when smelting logs in", furnace)
+
+            sent = true
+          end
         end
 
         -- We want to recount everything, so we just break out and immediately loop again.
@@ -1204,6 +1208,7 @@ _log.debug("Smelting thread is", thread.new(function()
 
       if not sent then
         s_log.debug("No logs could be smelted.")
+        sleep(0.95) -- To avoid "busy waiting" while still being relatively responsive.
       end
 
       sleep()
@@ -1226,9 +1231,84 @@ _log.debug("Smelting thread is", thread.new(function()
     else
       -- No free furnaces.
       s_log.debug("No free furnaces.")
-      sleep(10)
+      sleep(SMELT_TIME / 20 + 0.05)
     end
   end
+end).id)
+
+
+
+--- Furnace cleaner thread. Upon startup, checks all furnaces for items. Any furnaces with items are added to `furnaces_used`
+--- and will be watched until their contents no longer change after `SMELT_TIME` ticks.
+--- After this, they will be cleaned out and the furnaces will be opened.
+_log.debug("Furnace cleaner thread is", thread.new(function()
+  local furnace_contents = {}
+
+  local ph = new_parallelism_handler()
+  ph.limit = 16
+
+  for _, furnace in ipairs(config.furnaces) do
+    ph:add_task(function()
+      local items = smn.call(furnace, "list")
+      if items[1] or items[2] or items[3] then
+        furnaces_used[furnace] = true
+        furnace_contents[furnace] = items
+        s_log.debug("Furnace", furnace, "has items in it. Watching for changes.")
+      end
+    end)
+  end
+  ph:execute()
+
+  local function compare_item(a, b)
+    if not a and b or not b and a then
+      return false
+    end
+
+    if not a and not b then
+      return true
+    end
+
+    if a.name == b.name and a.count == b.count then
+      return true
+    end
+
+    return false
+  end
+
+  while next(furnace_contents) do
+    sleep(SMELT_TIME / 20 + 0.05)
+
+    for furnace, items in pairs(furnace_contents) do
+      ph:add_task(function()
+        local new_items = smn.call(furnace, "list")
+
+        local changed = false
+        for i = 1, 3 do
+          if not compare_item(items[i], new_items[i]) then
+            changed = true
+            break
+          end
+        end
+
+        if changed then
+          s_log.debug("Furnace", furnace, "has changed items.")
+          furnace_contents[furnace] = new_items
+        else
+          s_log.debug("Furnace", furnace, "has not changed items.")
+
+          -- Send the items back to storage.
+          send_all_to_storage(furnace)
+
+          furnaces_used[furnace] = nil
+          furnace_contents[furnace] = nil
+          s_log.debug("Furnace", furnace, "is now free.")
+        end
+      end)
+    end
+    ph:execute()
+  end
+
+  s_log.debug("Furnace cleaner thread is done.")
 end).id)
 
 
