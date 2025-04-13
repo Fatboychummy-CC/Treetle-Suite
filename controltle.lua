@@ -1178,11 +1178,14 @@ _log.debug("Smelting thread is", thread.new(function()
             repeat
               local _, id = os.pullEvent("timer")
             until id == timer_id
-
+          end)
+          :after(function()
+            s_log.debug("Furnace", furnace, "finished smelting.")
             -- Move everything back.
             send_all_to_storage(furnace)
+
+            furnace_times[timer_id] = nil
           end)
-          :after(function() furnace_times[timer_id] = nil end)
           :on_error(function(err)
             s_log.error("Error occurred when waiting for furnace", furnace, "to finish smelting.")
             s_log.error(err)
@@ -1250,6 +1253,24 @@ _log.debug("Crafting thread is", thread.new(function()
     local task = table.remove(crafting_queue, 1) --[[@as CraftingTask]]
     c_log.info("Running crafting task", task.id)
     run_crafting_task(task)
+  end
+end).id)
+
+
+
+--- Defragmentation thread.
+_log.debug("Defragmentation thread is", thread.new(function()
+  while true do
+    -- Acquire the lock.
+    storage_lock:await_lock()
+
+    -- Defragment the storages.
+    storages:defragment()
+
+    -- Release the lock.
+    storage_lock:unlock()
+
+    sleep(60 * 10) -- Every 10 minutes.
   end
 end).id)
 
