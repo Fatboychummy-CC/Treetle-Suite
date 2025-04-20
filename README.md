@@ -9,4 +9,6 @@ Each piece can be used independently of the other, but they are
 
 > [!IMPORTANT]
 > Currently, the user interface does nothing. You must manually create
-> a config file according to the specifications required.
+> a config file according to the specifications required. This will
+> change in the 1.0.0 update, which will also completely revamp the
+> UI itself, from its current basic look.
