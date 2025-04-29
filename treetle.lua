@@ -913,6 +913,15 @@ local function main()
       )
     else
       _log.info("Turtle was in the middle of a movement during a shutdown, but did not complete the move.")
+      _log.info("Completing move now.")
+      move(
+        turtle_state.last_movement == MOVEMENTS.FORWARD and turtle.forward or
+        turtle_state.last_movement == MOVEMENTS.BACK and turtle.back or
+        turtle_state.last_movement == MOVEMENTS.UP and turtle.up or
+        turtle_state.last_movement == MOVEMENTS.DOWN and turtle.down or
+        error("Invalid movement: " .. turtle_state.last_movement)
+      )
+      _log.info("Move completed.")
     end
   end
 
