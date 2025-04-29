@@ -1210,8 +1210,6 @@ _log.debug("Smelting thread is", thread.new(function()
         s_log.debug("No logs could be smelted.")
         sleep(0.95) -- To avoid "busy waiting" while still being relatively responsive.
       end
-
-      sleep()
     elseif free_furnaces[1] and total_logs > 0 and total_fuels == 0 then
       s_log.debug("No fuel to smelt with, crafting some...")
       -- We need to pull some logs to the turtle, convert them into planks,
@@ -1223,16 +1221,14 @@ _log.debug("Smelting thread is", thread.new(function()
         [1] = {names = LOG_IDS, count = 3}
       }, true)
 
-      -- Give the system about 5 seconds to process the crafting task.
-      sleep(5)
     elseif free_furnaces[1] and total_logs == 0 and total_fuels > 0 then
       s_log.debug("No logs to smelt. Waiting for logs.")
-      sleep(10)
     else
       -- No free furnaces.
       s_log.debug("No free furnaces.")
-      sleep(SMELT_TIME / 20 + 0.05)
     end
+
+    sleep(30) -- 30 seconds between each check.
   end
 end).id)
 
